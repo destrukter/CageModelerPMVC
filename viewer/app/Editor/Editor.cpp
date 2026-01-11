@@ -580,8 +580,6 @@ void Editor::OnNewProjectCreated()
 			const auto cageMesh = _scene->GetMesh(_deformedCageHandle);
 			cageMesh->SetModelMatrix(newModelMatrix);
 
-			
-
 			// We only recompute the vertex colors if they were previously on.
 			const auto renderInfluenceMap = _projectModel->CanRenderInfluenceMap();
 			if (renderInfluenceMap)
