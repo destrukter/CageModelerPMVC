@@ -41,6 +41,7 @@ public:
 
 	void Update(const double deltaTime);
 
+	
 private:
 	void SetUpUIElements();
 
