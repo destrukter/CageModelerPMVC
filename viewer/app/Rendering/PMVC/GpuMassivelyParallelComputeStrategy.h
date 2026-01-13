@@ -9,10 +9,10 @@
 #include <Rendering/Core/RenderResourceManager.h>
 #include <Rendering/PMVC/CubemapRenderInstance.h>
 
-class GpuAtomicComputeStrategy final : public ICubemapComputeStrategy
+class GpuMPComputeStrategy final : public ICubemapComputeStrategy
 {
 public:
-    GpuAtomicComputeStrategy(
+    GpuMPComputeStrategy(
         RenderResourceRef<Device> device,
         uint32_t transferQueueFamily,
         uint32_t faceSize,
@@ -32,11 +32,12 @@ public:
         , _cageMesh(cageMesh)
         , _deformableMesh(deformableMesh)
     {
+		_targetCount = _deformableMesh._vertices.rows();
     }
 
     uint32_t RequiredRenderTargetCount() const override;
-
-    void Initialize() override;
+    void Initialize() override {};
+    void Initialize(uint32_t targetCount);
 
     void DispatchAfterRender(
         uint32_t deformableIndex,
@@ -46,7 +47,27 @@ public:
         uint64_t signalValue,
         const CubemapRenderTarget& target);
 
+    void SubmitAllComputes(
+        VkSemaphore waitSemaphore,
+        uint64_t waitValue,
+        VkSemaphore signalSemaphore,
+        uint64_t signalValue);
+
     Eigen::MatrixXd Readback();
+
+    void RecordReadbackCopy(uint32_t slot);
+
+    void ConsumeAllSlots();
+
+    void SubmitAllReadbackCopies(
+        VkSemaphore waitSemaphore,
+        uint64_t waitValue,
+        VkSemaphore signalSemaphore,
+        uint64_t signalValue);
+
+    void RecordCompute(
+        uint32_t slot,
+        const CubemapRenderTarget& target);
 
     void ConsumeSlot(
         uint32_t deformableIndex,
@@ -64,7 +85,7 @@ private:
     void CreatePipelineAndLayouts();
     void AllocateResources();
 
-    const uint32_t kDispatchGroupSize = 8;
+    const uint32_t kDispatchGroupSize = 16; // maybe 8
 
     RenderResourceRef<Device> _device;
     uint32_t _transferQueueFamily = 0;

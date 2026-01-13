@@ -100,24 +100,47 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 		else if (_params._deformationType == DeformationType::MVC ||_params._deformationType == DeformationType::QMVC || _params._deformationType == DeformationType::MLC ||
 			_params._deformationType == DeformationType::MEC)
 		{
-			const auto& W = _params._weightsData._weights;
-			const auto& C = _params._deformedCage._vertices;
-
-			LOG_DEBUG("About to multiply: W^T ({} x {}) * C ({} x {})",
-				W.cols(), W.rows(),
-				C.rows(), C.cols());
-
-			CheckFormat(
-				W.cols() == C.rows(),
-				"INVALID DIMENSIONS: W^T.cols={} != C.rows={}",
-				W.cols(), C.rows()
-			);
 			vertexData[i]._vertices = _params._weightsData._weights.transpose() * _params._deformedCage._vertices;
 		}
 		else if (_params._deformationType == DeformationType::PMVCRayracing || _params._deformationType == DeformationType::PMVCLipman) {
-			vertexData[i]._vertices =
+			/*vertexData[i]._vertices =
 				_params._weightsData._weights *
-				_params._deformedCage._vertices;
+				_params._deformedCage._vertices;*/
+			/*const auto& W = _params._weightsData._weights;
+			const auto& C = _params._cage._vertices;
+			const auto& Cp = _params._deformedCage._vertices;
+			const auto& V = _params._mesh._vertices;
+
+			// PMVC projection onto original cage
+			Eigen::MatrixXd proj = W * C;
+
+			// PMVC projection onto deformed cage
+			Eigen::MatrixXd projDef = W * Cp;
+
+			// Restore offset
+			vertexData[i]._vertices = projDef + (V - proj);
+			*/
+			// Rest data (never modified)
+			const auto& C0 = _params._cage._vertices;
+			const auto& V0 = _params._mesh._vertices;
+
+			// Deformed cage
+			const auto& C1 = _params._deformedCage._vertices;
+
+			// PMVC weights
+			const auto& W = _params._weightsData._weights;
+
+			// 1) Project rest mesh to rest cage
+			Eigen::MatrixXd proj0 = W * C0;
+
+			// 2) Compute offset ONCE
+			Eigen::MatrixXd offset = V0 - proj0;
+
+			// 3) Project onto deformed cage
+			Eigen::MatrixXd proj1 = W * C1;
+
+			// 4) Final vertices
+			vertexData[i]._vertices = proj1 + offset;
 		}
 		else if (_params._deformationType == DeformationType::Somigliana)
 		{
