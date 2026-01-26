@@ -9,6 +9,7 @@
 #include <Thread/ThreadPool.h>
 #include <Tools/Tool.h>
 #include <Rendering//PMVC/CubemapRenderInstance.h>
+#include <Rendering/PMVC/Raytracer.h>
 
 class ProjectSettingsPanel;
 class ProjectOptionsPanel;
@@ -23,6 +24,7 @@ class StatusBar;
 class RenderPipelineManager;
 class InputSubsystem;
 class CubemapManager;
+class Raytracer;
 
 /**
  * This class serves as a mediator between the user interface backend and the current state of the application.
@@ -221,7 +223,7 @@ private:
 
 	std::shared_ptr<CubemapManager> _cubemapRenderer = nullptr;
 
-	std::shared_ptr<CubemapManager> _raytracer = nullptr;
+	std::shared_ptr<Raytracer> _raytracer = nullptr;
 
 	/// All gizmos in the scene.
 	std::shared_ptr<Gizmo> _gizmo;
