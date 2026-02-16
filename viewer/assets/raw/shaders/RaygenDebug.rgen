@@ -21,17 +21,21 @@ layout(location = 0) rayPayloadEXT uint payload;
 
 void main()
 {
-    uint rayIndex = gl_LaunchIDEXT.x;
+    uint rayIndex =  gl_LaunchIDEXT.x +
+    gl_LaunchIDEXT.y * gl_LaunchSizeEXT.x +
+    gl_LaunchIDEXT.z * gl_LaunchSizeEXT.x * gl_LaunchSizeEXT.y;
 
     uint vertexIndex = rayIndex / pc.raysPerVertex;
 
     if (vertexIndex >= pc.vertexCount)
         return;
 
-    vec3 origin = vertices[vertexIndex];
+    vec3 origin = vertices[vertexIndex].xyz;
     vec3 dir    = normalize(directions[rayIndex].xyz);
 
-    payload = 123456u;
+    payload = rayIndex;
+    if (rayIndex == 0)
+    payload = 999999;
 
     traceRayEXT(
         tlas,
