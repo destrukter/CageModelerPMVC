@@ -35,7 +35,6 @@ void WriteWeightsToFile(const std::string& filename, Eigen::MatrixXd _lambdaResu
 	LOG_INFO("Weights written to " + filename);
 }
 
-
 MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation::Execute()
 {
 	const auto params = fromDeformedCage(_params._cage._vertices, _params._deformedCage._vertices);
@@ -130,30 +129,15 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 		else if (_params._deformationType == DeformationType::MVC ||_params._deformationType == DeformationType::QMVC || _params._deformationType == DeformationType::MLC ||
 			_params._deformationType == DeformationType::MEC)
 		{
-			WriteWeightsToFile("mvc", _params._weightsData._weights.transpose());
+			//WriteWeightsToFile("mvc", _params._weightsData._weights.transpose());
 			vertexData[i]._vertices = _params._weightsData._weights.transpose() * _params._deformedCage._vertices;
 		}
 		else if (_params._deformationType == DeformationType::PMVCRayracing || _params._deformationType == DeformationType::PMVCLipman) {
-			/*vertexData[i]._vertices =
-				_params._weightsData._weights *
-				_params._deformedCage._vertices;*/
-			/*const auto& W = _params._weightsData._weights;
-			const auto& C = _params._cage._vertices;
-			const auto& Cp = _params._deformedCage._vertices;
-			const auto& V = _params._mesh._vertices;
-
-			// PMVC projection onto original cage
-			Eigen::MatrixXd proj = W * C;
-
-			// PMVC projection onto deformed cage
-			Eigen::MatrixXd projDef = W * Cp;
-
-			// Restore offset
-			vertexData[i]._vertices = projDef + (V - proj);
-			*/
+			
 			// Rest data (never modified)
-			/*const auto& C0 = _params._cage._vertices;
+			const auto& C0 = _params._cage._vertices;
 			const auto& V0 = _params._mesh._vertices;
+			
 
 			// Deformed cage
 			const auto& C1 = _params._deformedCage._vertices;
@@ -171,9 +155,11 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 			Eigen::MatrixXd proj1 = W * C1;
 
 			// 4) Final vertices
-			vertexData[i]._vertices = proj1 + offset;*/
-			WriteWeightsToFile("pmvc", _params._weightsData._weights);
-			vertexData[i]._vertices = _params._weightsData._weights * _params._deformedCage._vertices;
+			vertexData[i]._vertices = proj1 + offset;
+			
+			//WriteWeightsToFile("pmvc", _params._weightsData._weights);
+			//
+			//vertexData[i]._vertices = _params._weightsData._weights * _params._deformedCage._vertices;
 		}
 		else if (_params._deformationType == DeformationType::Somigliana)
 		{
