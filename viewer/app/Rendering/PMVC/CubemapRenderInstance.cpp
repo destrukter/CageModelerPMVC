@@ -13,6 +13,8 @@
 #include <Rendering/PMVC/DebugCubemapComputeStrategy.h>
 #include <Rendering/PMVC/ScopedCmdBuffer.h>
 #include <Rendering/PMVC/GpuSerialComputeStrategy.h>
+#include <Rendering/PMVC/GpuMassivelyParallelComputeStrategy.h>
+#include <Mesh/Operations/MeshWeightsParams.h>
 
 CubemapRenderInstance::~CubemapRenderInstance() {
 	//TODO: cleanup
@@ -22,7 +24,7 @@ CubemapRenderInstance::CubemapRenderInstance()
 {
 	_cubemapSize = 32;
 	_format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	_computeType = ComputeType::CPU;
+	_deformationType = DeformationType::PMVCSerialNoOffset;
 	Initialize();
 }
 
@@ -30,7 +32,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	CubemapManager& cubemapManager,
 	int cubemapSize,
 	VkFormat format,
-	ComputeType computeType,
+	DeformationType deformationType,
 
 	RenderResourceRef<Device> device,
 	RenderResourceRef<DescriptorPool> descriptorPool,
@@ -42,77 +44,39 @@ CubemapRenderInstance::CubemapRenderInstance(
 
 	VkCommandPool graphicsCommandPool,
 	VkRenderPass renderPass,
+	VkRenderPass renderPassCpu,
 	PipelineHandle cubemapPipelineHandle,
+	PipelineHandle cubemapPipelineHandleCpu,
 
 	RenderResourceRef<DescriptorSetLayout> matricesLayout,
 
 	MemoryMappedBuffer indexBuffer,
 	MemoryMappedBuffer vertexBuffer
 ): _cubemapSize(cubemapSize)
-	, _format(format)
-	, _computeType(computeType)
-	, _device(std::move(device))
-	, _descriptorPool(std::move(descriptorPool))
-	, _resourceManager(std::move(resourceManager))
-	, _renderPipelineManager(std::move(renderPipelineManager))
-	, _cageMesh(std::move(cageMesh))
-	, _deformableMesh(std::move(deformableMesh))
-	, _graphicsCommandPool(graphicsCommandPool)
-	, _renderPass(renderPass)
-	, _cubemapPipelineHandle(cubemapPipelineHandle)
-	, _matricesLayout(std::move(matricesLayout))
-	, _indexBuffer(std::move(indexBuffer))
-	, _vertexBuffer(std::move(vertexBuffer))
+, _format(format)
+, _deformationType(deformationType)
+, _device(std::move(device))
+, _descriptorPool(std::move(descriptorPool))
+, _resourceManager(std::move(resourceManager))
+, _renderPipelineManager(std::move(renderPipelineManager))
+, _cageMesh(std::move(cageMesh))
+, _deformableMesh(std::move(deformableMesh))
+, _graphicsCommandPool(graphicsCommandPool)
+, _renderPass(renderPass)
+, _renderPassCpu(renderPassCpu)
+, _cubemapPipelineHandle(cubemapPipelineHandle)
+, _matricesLayout(std::move(matricesLayout))
+, _indexBuffer(std::move(indexBuffer))
+, _vertexBuffer(std::move(vertexBuffer))
+, _cubemapPipelineHandleCpu(cubemapPipelineHandleCpu)
 {
 	Initialize();
 }
-/*
-_cubemapManager._device,
-			_cubemapManager._device->GetQueueFamilies()._graphics.value(),
-_cubemapManager._descriptorPool,
-			_cubemapManager._resourceManager,
-			_cubemapManager._renderPipelineManager,
-			_cubemapManager._cageMesh,
-			_cubemapManager._deformableMesh
-			grafics command pool 
-			rednerpass
-			matriceslayout
-*/
+
 void CubemapRenderInstance::Initialize() {
-	switch (_computeType)
-	{
-	case ComputeType::CPU:
-		_computeStage = std::make_unique<CpuComputeStrategy>();
-		break;
-	case ComputeType::GPUATOMIC:
-		_computeStage = std::make_unique<GpuAtomicComputeStrategy>(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format,
-			_descriptorPool,
-			_resourceManager,
-			_renderPipelineManager,
-			_cageMesh,
-			_deformableMesh
-		);
-		break;
-	case ComputeType::DEBUGCUBEMAPS:
-		VkQueue transferQueue;
-		vkGetDeviceQueue(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(), 
-			0,
-			&transferQueue);
-		_computeStage = std::make_unique<DebugCubemapComputeStrategy>(
-			_device,
-			_device->GetPhysicalDeviceHandle(),
-			transferQueue,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format);
-		break;
-	case ComputeType::GPUSERIAL:
+	_offset = DeformationTypeHelpers::PMVCOffset(_deformationType);
+
+	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
 		_computeStage = std::make_unique<GpuSerialComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -122,15 +86,55 @@ void CubemapRenderInstance::Initialize() {
 			_resourceManager,
 			_renderPipelineManager,
 			_cageMesh,
-			_deformableMesh
+			_deformableMesh, 
+			_offset
 		);
-		break;
+	}
+	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+		_computeStage = std::make_unique<GpuAtomicComputeStrategy>(
+			_device,
+			_device->GetQueueFamilies()._graphics.value(),
+			_cubemapSize,
+			_format,
+			_descriptorPool,
+			_resourceManager,
+			_renderPipelineManager,
+			_cageMesh,
+			_deformableMesh,
+			_offset
+		);
+	}
+	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+		_computeStage = std::make_unique<GpuMPComputeStrategy>(
+			_device,
+			_device->GetQueueFamilies()._graphics.value(),
+			_cubemapSize,
+			_format,
+			_descriptorPool,
+			_resourceManager,
+			_renderPipelineManager,
+			_cageMesh,
+			_deformableMesh,
+			_offset
+		);
+	}
+	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+		_computeStage = std::make_unique<CpuComputeStrategy>(
+			_device,
+			_device->GetQueueFamilies()._graphics.value(),
+			_cubemapSize,
+			_format,
+			_descriptorPool,
+			_resourceManager,
+			_renderPipelineManager,
+			_cageMesh,
+			_deformableMesh,
+			_offset
+		);
 	}
 
 	uint32_t graphicsQueueFamilyIndex = _device->GetQueueFamilies()._graphics.value();
 	CreateCommandPool(graphicsQueueFamilyIndex);
-
-	_cubemapRenderUnit = CreateCubemapRenderUnit();
 
 	const uint32_t targetCount = _computeStage->RequiredRenderTargetCount();
 	_computeStage->Initialize();
@@ -140,6 +144,8 @@ void CubemapRenderInstance::Initialize() {
 	{
 		_cubemapRenderUnit.targets.push_back(CreateCubemapRenderTarget());
 	}
+
+	_cubemapRenderUnit = CreateCubemapRenderUnit();
 	UpdateMatricesDescriptorSet();
 	CreateSyncObjects();
 	//_sphereWeightCalculator = SphereWeightCalculator();
@@ -167,7 +173,6 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 		VK_IMAGE_USAGE_SAMPLED_BIT |
 		VK_IMAGE_USAGE_STORAGE_BIT |
-		VK_IMAGE_LAYOUT_GENERAL |
 		VK_IMAGE_USAGE_TRANSFER_SRC_BIT; //TODO: only added for debugging prints for image remove after done(needed for CPU compute?)
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -184,7 +189,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	VK_CHECK(vkBindImageMemory(_device, target.cubemapImage, target.cubemapMemory, 0));
 
 
-	VkCommandBufferAllocateInfo allocInfoCB{
+	/*VkCommandBufferAllocateInfo allocInfoCB{
 	.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
 	.commandPool = _graphicCommandPool, // or graphics pool
 	.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -200,7 +205,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	};
 
 	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-
+	*/
 	// ---------------------------------------------------------------------
 	// Create per-face color views
 	// ---------------------------------------------------------------------
@@ -255,7 +260,9 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	depthInfo.arrayLayers = 6;
 	depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+		VK_IMAGE_USAGE_SAMPLED_BIT |
+		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImage));
@@ -286,6 +293,18 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[face]));
 	}
 
+	VkImageViewCreateInfo depthViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	depthViewInfo.image = target.depthImage;
+	depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	depthViewInfo.format = depthFormat;
+	depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	depthViewInfo.subresourceRange.baseMipLevel = 0;
+	depthViewInfo.subresourceRange.levelCount = 1;
+	depthViewInfo.subresourceRange.baseArrayLayer = 0;
+	depthViewInfo.subresourceRange.layerCount = 6;
+
+	VK_CHECK(vkCreateImageView(_device, &depthViewInfo, nullptr, &target.depthView));
+
 	// ---------------------------------------------------------------------
 	// Create framebuffers
 	// ---------------------------------------------------------------------
@@ -297,7 +316,10 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		};
 
 		VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-		fbInfo.renderPass = _renderPass;
+		if(_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType ==  DeformationType::PMVCCpuOffset)
+			fbInfo.renderPass = _renderPassCpu;
+		else
+			fbInfo.renderPass = _renderPass;
 		fbInfo.attachmentCount = 2;
 		fbInfo.pAttachments = attachments;
 		fbInfo.width = _cubemapSize;
@@ -314,7 +336,7 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 {
 	VkDeviceSize matricesUBOSize = sizeof(CubemapMatricesUBO);
 	CubemapRenderUnit unit{};
-
+	unit.targets = _cubemapRenderUnit.targets;
 	// ------------------------------------------------------------
 	// Create uniform buffer
 	// ------------------------------------------------------------
@@ -350,7 +372,7 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 	// ------------------------------------------------------------
 	// Allocate command buffers (one per face)
 	// ------------------------------------------------------------
-	std::array<VkCommandBuffer, 6> buffers{};
+	/*std::array<VkCommandBuffer, 6> buffers{};
 
 	VkCommandBufferAllocateInfo alloc{
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -364,14 +386,39 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 		&alloc,
 		buffers.data()));
 
-	//unit.beginCmd = buffers[0];
+	//unit.beginCmd = buffers[0];*/
+	const uint32_t targetCount =
+		static_cast<uint32_t>(unit.targets.size());
+	unit.graphicsCmdPerTarget.resize(targetCount);
 
-	for (uint32_t i = 0; i < 6; ++i)
+	/*for (uint32_t i = 0; i < 6; ++i)
 		unit.graphicsCmd[i] = buffers[i];
-
+		*/
 	//unit.endCmd = buffers[7];
 
+	if (targetCount > 0)
+	{
+		std::vector<VkCommandBuffer> flatBuffers(targetCount * 6);
 
+		VkCommandBufferAllocateInfo alloc{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.commandPool = _graphicCommandPool,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = static_cast<uint32_t>(flatBuffers.size())
+		};
+		VK_CHECK(vkAllocateCommandBuffers(
+			_device,
+			&alloc,
+			flatBuffers.data()));
+		for (uint32_t target = 0; target < targetCount; ++target)
+		{
+			for (uint32_t face = 0; face < 6; ++face)
+			{
+				unit.graphicsCmdPerTarget[target][face] =
+					flatBuffers[target * 6 + face];
+			}
+		}
+	}
 	/*VkCommandBufferAllocateInfo cmdAllocInfo{
 		VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
 	};
@@ -420,11 +467,14 @@ void CubemapRenderInstance::UpdateMatricesDescriptorSet()
 
 void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	uint32_t cubemapIdx,
+	uint32_t targetIndex,
 	const glm::vec3& camPos,
 	CubemapRenderTarget& target,
 	VkSemaphore timeline,
 	uint64_t signalValue)
 {
+	assert(targetIndex < _cubemapRenderUnit.graphicsCmdPerTarget.size());
+
 	VkClearValue clearValues[2]{};
 	clearValues[0].color = { {0.f, 0.f, 0.f, 1.f} };
 	clearValues[1].depthStencil = { 1.f, 0 };
@@ -433,10 +483,14 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	};
+	
+	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
+	if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+		pipelineHandle = _cubemapPipelineHandleCpu;
 
 	const PipelineObject& pipelineObj =
 		_renderPipelineManager->GetPipelineObject(
-			_cubemapPipelineHandle);
+			pipelineHandle);
 
 	// ---------------------------------------------------------------------
 	// Update shared UBO (outside render loop)
@@ -456,7 +510,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	// =====================================================================
 	for (uint32_t face = 0; face < 6; ++face)
 	{
-		VkCommandBuffer cmd = _cubemapRenderUnit.graphicsCmd[face];
+		VkCommandBuffer cmd = _cubemapRenderUnit.graphicsCmdPerTarget[targetIndex][face];
 		VK_CHECK(vkResetCommandBuffer(cmd, 0));
 		VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
@@ -473,9 +527,13 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			sizeof(push),
 			&push);
 
+		VkRenderPass renderPass = _renderPass;
+		if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+			renderPass = _renderPassCpu;
+
 		VkRenderPassBeginInfo rpInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-			.renderPass = _renderPass,
+			.renderPass = renderPass,
 			.framebuffer = target.framebuffers[face],
 			.renderArea = {{0, 0}, {_cubemapSize, _cubemapSize}},
 			.clearValueCount = 2,
@@ -484,8 +542,8 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 
 		vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineObj._handle);
-		
-		VkBuffer vb[] = { _vertexBuffer._deviceBuffer};
+
+		VkBuffer vb[] = { _vertexBuffer._deviceBuffer };
 		VkDeviceSize offs[] = { 0 };
 		vkCmdBindVertexBuffers(cmd, 0, 1, vb, offs);
 		vkCmdBindIndexBuffer(
@@ -520,7 +578,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		cmdInfos[i] = {
 			VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
 			nullptr,
-			_cubemapRenderUnit.graphicsCmd[i]
+			_cubemapRenderUnit.graphicsCmdPerTarget[targetIndex][i]
 		};
 	}
 
@@ -584,7 +642,7 @@ std::vector<glm::vec3> CubemapRenderInstance::BuildDeformableVertexPositions() c
 	std::vector<glm::vec3> vertices;
 	vertices.reserve(_deformableMesh._vertices.rows());
 
-	for (int i = 0; i <_deformableMesh._vertices.rows(); ++i)
+	for (int i = 0; i < _deformableMesh._vertices.rows(); ++i)
 	{
 		const auto& v = _deformableMesh._vertices.row(i);
 
@@ -598,269 +656,359 @@ std::vector<glm::vec3> CubemapRenderInstance::BuildDeformableVertexPositions() c
 	return vertices;
 }
 
-void SphereWeightCalculator::SphereWeightInitialization(uint32_t size, RenderResourceRef<Device> device, std::shared_ptr<RenderResourceManager> resourceManager, VkCommandPool commandPool) {
-	const uint32_t faceSize = size;
-	const uint32_t faceCount = 6;
-
-	// ------------------------------------------------------------
-	// 1) CPU: precompute solid-angle weights (ONCE)
-	// ------------------------------------------------------------
-	std::vector<float> weights(faceCount * faceSize * faceSize);
-
-	for (uint32_t face = 0; face < faceCount; ++face) {
-		for (uint32_t y = 0; y < faceSize; ++y) {
-			for (uint32_t x = 0; x < faceSize; ++x) {
-				weights[
-					face * faceSize * faceSize +
-						y * faceSize + x
-				] = ComputeSphereWeight(x, y, faceSize, face);
-			}
-		}
-	}
-
-	// ------------------------------------------------------------
-	// 2) Create GPU image (R32_SFLOAT, 6 layers)
-	// ------------------------------------------------------------
-	VkImageCreateInfo img{};
-	img.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	img.imageType = VK_IMAGE_TYPE_2D;
-	img.format = VK_FORMAT_R32_SFLOAT;
-	img.extent = { faceSize, faceSize, 1 };
-	img.mipLevels = 1;
-	img.arrayLayers = 6;
-	img.samples = VK_SAMPLE_COUNT_1_BIT;
-	img.tiling = VK_IMAGE_TILING_OPTIMAL;
-	img.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-	img.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	vkCreateImage(device, &img, nullptr, &_solidAngleImage);
-
-	VkMemoryRequirements memReq{};
-	vkGetImageMemoryRequirements(device, _solidAngleImage, &memReq);
-
-	VkPhysicalDeviceMemoryProperties memProperties;
-	vkGetPhysicalDeviceMemoryProperties(device->GetPhysicalDeviceHandle(), &memProperties);
-
-	std::optional<uint32_t> memtype;
-
-	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-		if (memReq.memoryTypeBits & (1 << i)) {
-			if (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-				memtype = i;
-				break;
-			}
-		}
-	}
-
-	// Fallback: accept any compatible memory
-	if (!memtype.has_value()) {
-		for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-			if (memReq.memoryTypeBits & (1 << i)) {
-				memtype = i;
-				break;
-			}
-		}
-	}
-
-	if (!memtype.has_value()) {
-		throw std::runtime_error("Failed to find ANY compatible memory type for solid angle image!");
-	}
-
-
-	VkMemoryAllocateInfo alloc{};
-	alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	alloc.allocationSize = memReq.size;
-	alloc.memoryTypeIndex = memtype.value();
-
-	vkAllocateMemory(device, &alloc, nullptr, &_solidAngleMemory);
-	vkBindImageMemory(device, _solidAngleImage, _solidAngleMemory, 0);
-
-	// ------------------------------------------------------------
-	// 3) Upload via staging buffer
-	// ------------------------------------------------------------
-	const VkDeviceSize uploadBytes = weights.size() * sizeof(float);
-
-	auto staging = resourceManager->CreateBufferAndCopy(
-		std::span<const float>(weights.data(), weights.size()),
-		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-		VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-	);
-
-
-	ScopedCmdBuffer scoped(device, commandPool);
-	VkCommandBuffer cmd = scoped.Get();
-
-	VkImageSubresourceRange range{};
-	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	range.baseMipLevel = 0;
-	range.levelCount = 1;
-	range.baseArrayLayer = 0;
-	range.layerCount = 6;
-
-	VkImageMemoryBarrier barrier1{};
-	barrier1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	barrier1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier1.srcAccessMask = 0;
-	barrier1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier1.image = _solidAngleImage;
-	barrier1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier1.subresourceRange.baseMipLevel = 0;
-	barrier1.subresourceRange.levelCount = 1;
-	barrier1.subresourceRange.baseArrayLayer = 0;
-	barrier1.subresourceRange.layerCount = 6;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier1
-	);
-
-	VkBufferImageCopy copy{};
-	copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	copy.imageSubresource.mipLevel = 0;
-	copy.imageSubresource.baseArrayLayer = 0;
-	copy.imageSubresource.layerCount = 6;
-	copy.imageExtent = { faceSize, faceSize, 1 };
-
-	vkCmdCopyBufferToImage(
-		cmd,
-		staging._deviceBuffer,
-		_solidAngleImage,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		1,
-		&copy
-	);
-
-	VkImageMemoryBarrier barrier2{};
-	barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	barrier2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	barrier2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	barrier2.image = _solidAngleImage;
-	barrier2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier2.subresourceRange.baseMipLevel = 0;
-	barrier2.subresourceRange.levelCount = 1;
-	barrier2.subresourceRange.baseArrayLayer = 0;
-	barrier2.subresourceRange.layerCount = 6;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier2
-	);
-
-	VkQueue transferQueue;
-	vkGetDeviceQueue(
-		device,
-		device->GetQueueFamilies()._graphics.value(),
-		0,
-		&transferQueue);
-	scoped.SubmitAndWait(transferQueue);
-
-	// ------------------------------------------------------------
-	// 4) Create 2D-array image view (for compute)
-	// ------------------------------------------------------------
-	VkImageViewCreateInfo view{};
-	view.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	view.image = _solidAngleImage;
-	view.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	view.format = VK_FORMAT_R32_SFLOAT;
-	view.subresourceRange = range;
-
-	vkCreateImageView(device, &view, nullptr, &_solidAngleArrayView);
-
-	// ------------------------------------------------------------
-	// 5) Create sampler (NEAREST)
-	// ------------------------------------------------------------
-	VkSamplerCreateInfo samp{};
-	samp.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samp.magFilter = VK_FILTER_NEAREST;
-	samp.minFilter = VK_FILTER_NEAREST;
-	samp.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	samp.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-	samp.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-	samp.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-
-	vkCreateSampler(device, &samp, nullptr, &_solidAngleSampler);
-	double sum = 0.0;
-	for (float w : weights) sum += w;
-	//LOG_DEBUG("Total solid angle = " + std::to_string(sum));
+static double SecondsSince(
+	const std::chrono::high_resolution_clock::time_point& start)
+{
+	using namespace std::chrono;
+	return duration<double>(high_resolution_clock::now() - start).count();
 }
 
-float SphereWeightCalculator::ComputeSphereWeight(
-	int px,
-	int py,
-	int faceSize,
-	int face)
+glm::mat4 CubemapRenderInstance::ComputeCubemapViewMatrix(uint32_t faceIndex, const glm::vec3& pos)
 {
-	// Step 1: pixel coordinates in [-1,1]
-	float invSize = 1.0f / faceSize;
-
-	float x0 = 2.0f * (px + 0) * invSize - 1.0f;
-	float y0 = 2.0f * (py + 0) * invSize - 1.0f;
-	float x1 = 2.0f * (px + 1) * invSize - 1.0f;
-	float y1 = 2.0f * (py + 1) * invSize - 1.0f;
-
-	// Step 2: map cube face to sphere (face-aware)
-	auto MapToSphere = [&](float x, float y) -> std::array<float, 3>
+	switch (faceIndex)
 	{
-		float vx, vy, vz;
+	case 0: return glm::lookAt(pos, pos + glm::vec3(1, 0, 0), glm::vec3(0, -1, 0)); // +X
+	case 1: return glm::lookAt(pos, pos + glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)); // -X
+	case 2: return glm::lookAt(pos, pos + glm::vec3(0, 1, 0), glm::vec3(0, 0, 1));  // +Y
+	case 3: return glm::lookAt(pos, pos + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)); // -Y
+	case 4: return glm::lookAt(pos, pos + glm::vec3(0, 0, 1), glm::vec3(0, -1, 0)); // +Z
+	case 5: return glm::lookAt(pos, pos + glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)); // -Z
+	default: return glm::mat4(1.0f);
+	}
+}
 
-		switch (face) {
-		case 0: vx = 1; vy = -y; vz = -x; break; // +X
-		case 1: vx = -1; vy = -y; vz = x; break; // -X
-		case 2: vx = x; vy = 1; vz = y; break; // +Y
-		case 3: vx = x; vy = -1; vz = -y; break; // -Y
-		case 4: vx = x; vy = -y; vz = 1; break; // +Z
-		case 5: vx = -x; vy = -y; vz = -1; break; // -Z
-		default: vx = vy = vz = 0; break;
+uint32_t CubemapRenderInstance::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const
+{
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(_device->GetPhysicalDeviceHandle(), &memProperties);
+
+	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+			return i;
+	}
+	throw std::runtime_error("Failed to find suitable memory type!");
+}
+
+void CubemapRenderInstance::ComputeCoordinatesGPUMP(
+	const CubemapWorkRange& range,
+	Eigen::MatrixXd& weights)
+{
+	auto waitStart = std::chrono::high_resolution_clock::now();
+	auto waitTemp = std::chrono::high_resolution_clock::now();
+	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
+
+	auto* computeStage =
+		static_cast<GpuMPComputeStrategy*>(_computeStage.get());
+
+	const auto vertices = BuildDeformableVertexPositions();
+
+	const uint32_t end = std::min<uint32_t>(
+		range.first + range.count,
+		static_cast<uint32_t>(vertices.size())
+	);
+
+	const uint32_t cubemapCount = end - range.first;
+
+	VkSemaphore timeline = _timelines[0];
+	uint64_t& timelineValue = _slotDoneValue[0];
+
+	if (timelineValue > 0)
+	{
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &timeline;
+		waitInfo.pValues = &timelineValue;
+		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+	}
+
+	if (timelineValue > 0)
+	{
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &timeline;
+		waitInfo.pValues = &timelineValue;
+		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+	}
+	// ============================================================
+	// Phase 1: Render ALL cubemaps
+	// ============================================================
+	uint64_t renderDone = timelineValue;
+
+	double waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG("Init complete");
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+
+	waitTemp = std::chrono::high_resolution_clock::now();
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		const uint32_t cubemapIdx = range.first + i;
+		CubemapRenderTarget& target =
+			_cubemapRenderUnit.targets[i];
+		renderDone = ++timelineValue;
+		RecordAndSubmitCubemapRender(
+			cubemapIdx,
+			i,
+			vertices[cubemapIdx],
+			target,
+			timeline,
+			renderDone
+		);
+	}
+	LOG_DEBUG("Cubemap Renders submitted");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+	// ============================================================
+	// Phase 2: Record ALL compute command buffers
+	// ============================================================
+	waitTemp = std::chrono::high_resolution_clock::now();
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		computeStage->RecordCompute(
+			i,
+			_cubemapRenderUnit.targets[i],
+			range.first + i
+		);
+	}
+	LOG_DEBUG("Cubemap Renders recorded");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+
+	uint64_t computeDone = ++timelineValue;
+	waitTemp = std::chrono::high_resolution_clock::now();
+	computeStage->SubmitAllComputes(
+		timeline,
+		renderDone,
+		timeline,
+		computeDone
+	);
+	LOG_DEBUG("Computes submitted");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+	// ============================================================
+	// Phase 3: Submit ALL readback copies
+	// ============================================================
+	uint64_t copyDone = ++timelineValue;
+	waitTemp = std::chrono::high_resolution_clock::now();
+	computeStage->SubmitAllReadbackCopies(
+		timeline,
+		computeDone,
+		timeline,
+		copyDone
+	);
+	LOG_DEBUG("Readback submitted");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+	// ============================================================
+	// Phase 4: Wait ONCE (everything complete)
+	// ============================================================
+	VkSemaphoreWaitInfo wait{};
+	wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+	wait.semaphoreCount = 1;
+	wait.pSemaphores = &timeline;
+	wait.pValues = &copyDone;
+
+	vkWaitSemaphores(_device, &wait, UINT64_MAX);
+	//timelineValue = copyDone;
+	timelineValue = copyDone;
+	// ============================================================
+	// Phase 5: Consume ALL slots (CPU-side)
+	// ============================================================
+	waitTemp = std::chrono::high_resolution_clock::now();
+	computeStage->ConsumeAllSlots();
+	LOG_DEBUG("Slots consumed");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+	waitTemp = std::chrono::high_resolution_clock::now();
+	weights = computeStage->Readback();
+	LOG_DEBUG("Readback complete");
+	waitSeconds = SecondsSince(waitTemp);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched): done");
+	waitSeconds = SecondsSince(waitStart);
+	LOG_DEBUG(
+		"Total time={:.6f} ms",
+		waitSeconds * 1000.0);
+}
+
+void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
+	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
+{
+	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): range.first={}, range.count={}",
+		range.first, range.count);
+
+	auto* computeStage =
+		static_cast<GpuAtomicComputeStrategy*>(_computeStage.get());
+
+	const auto vertices = BuildDeformableVertexPositions();
+
+	const uint32_t end = std::min<uint32_t>(
+		range.first + range.count,
+		static_cast<uint32_t>(vertices.size())
+	);
+
+	constexpr uint32_t SlotCount = 3; // ⭐ sweet spot
+	static_assert(SlotCount > 0);
+
+	// ------------------------------------------------------------
+	// Main submission loop (NO per-iteration CPU wait)
+	// ------------------------------------------------------------
+	double totalSlotWaitMs = 0.0;
+	for (uint32_t cubemapIdx = range.first; cubemapIdx < end; ++cubemapIdx)
+	{
+		const uint32_t slot = cubemapIdx % SlotCount;
+
+		CubemapRenderTarget& target =
+			_cubemapRenderUnit.targets[slot];
+
+		VkSemaphore timeline = _timelines[slot];
+		uint64_t& timelineValue = _slotDoneValue[slot];
+
+		LOG_DEBUG("[Pipelined] cubemapIdx={}, slot={}", cubemapIdx, slot);
+
+		// --------------------------------------------------------
+		// 0) Wait ONLY if slot is being reused
+		// --------------------------------------------------------
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+
+			auto waitStart = std::chrono::high_resolution_clock::now();
+
+			vkWaitSemaphores(
+				_device,
+				&waitInfo,
+				UINT64_MAX
+			);
+
+			double waitSeconds = SecondsSince(waitStart);
+
+			LOG_DEBUG(
+				"  [SlotWait] slot={}, value={}, wait={:.6f} ms",
+				slot,
+				timelineValue,
+				waitSeconds * 1000.0
+			);
+			totalSlotWaitMs += waitSeconds * 1000.0;
 		}
 
-		float len = std::sqrt(vx * vx + vy * vy + vz * vz);
-		return { vx / len, vy / len, vz / len };
-	};
+		// --------------------------------------------------------
+		// 1) Render
+		// --------------------------------------------------------
+		uint64_t renderDone = ++timelineValue;
 
-	auto c00 = MapToSphere(x0, y0);
-	auto c01 = MapToSphere(x0, y1);
-	auto c10 = MapToSphere(x1, y0);
-	auto c11 = MapToSphere(x1, y1);
+		LOG_DEBUG("  [Render] signal={}", renderDone);
 
-	// Step 3: convert to spherical coordinates
-	auto Theta = [](const std::array<float, 3>& v) {
-		return std::acos(std::clamp(v[2], -1.0f, 1.0f));
-	};
-	auto Phi = [](const std::array<float, 3>& v) {
-		return std::atan2(v[1], v[0]);
-	};
+		RecordAndSubmitCubemapRender(
+			cubemapIdx,
+			slot,
+			vertices[cubemapIdx],
+			target,
+			timeline,
+			renderDone
+		);
 
-	float theta00 = Theta(c00), phi00 = Phi(c00);
-	float theta01 = Theta(c01), phi01 = Phi(c01);
-	float theta10 = Theta(c10), phi10 = Phi(c10);
-	float theta11 = Theta(c11), phi11 = Phi(c11);
+		// --------------------------------------------------------
+		// 2) Compute (waits on renderDone)
+		// --------------------------------------------------------
+		uint64_t computeDone = ++timelineValue;
 
-	// Step 4–5: integrate solid angle
-	float thetaMin = std::min({ theta00, theta01, theta10, theta11 });
-	float thetaMax = std::max({ theta00, theta01, theta10, theta11 });
+		LOG_DEBUG("  [Compute] wait={}, signal={}",
+			renderDone, computeDone);
 
-	float phiMin = std::min({ phi00, phi01, phi10, phi11 });
-	float phiMax = std::max({ phi00, phi01, phi10, phi11 });
+		computeStage->DispatchAfterRender(
+			cubemapIdx,
+			slot,
+			timeline,
+			renderDone,
+			computeDone,
+			target
+		);
 
-	float innerIntegral = std::cos(thetaMin) - std::cos(thetaMax);
-	float weight = (phiMax - phiMin) * innerIntegral;
+		// --------------------------------------------------------
+		// 3) Copy (waits on computeDone)
+		// --------------------------------------------------------
+		uint64_t copyDone = ++timelineValue;
 
-	return weight;
+		LOG_DEBUG("  [Copy] wait={}, signal={}",
+			computeDone, copyDone);
+
+		computeStage->SubmitReadbackCopy(
+			slot,
+			timeline,
+			computeDone,
+			copyDone
+		);
+
+		computeStage->ConsumeSlot(
+			cubemapIdx,
+			slot,
+			timeline,
+			copyDone
+		);
+
+		// timelineValue now represents the last in-flight op for this slot
+	}
+
+	// ------------------------------------------------------------
+	// Final synchronization (wait for ALL slots)
+	// ------------------------------------------------------------
+	for (uint32_t slot = 0; slot < SlotCount; ++slot)
+	{
+		VkSemaphore timeline = _timelines[slot];
+		uint64_t value = _slotDoneValue[slot];
+
+		if (value == 0)
+			continue;
+
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &timeline;
+		waitInfo.pValues = &value;
+
+		auto waitStart = std::chrono::high_resolution_clock::now();
+
+		vkWaitSemaphores(_device, &waitInfo, UINT64_MAX);
+
+		double waitSeconds = SecondsSince(waitStart);
+
+		LOG_DEBUG(
+			"  [FinalWait] slot={}, value={}, wait={:.6f} ms",
+			slot,
+			value,
+			waitSeconds * 1000.0);
+		totalSlotWaitMs += waitSeconds * 1000.0;
+	}
+	LOG_DEBUG(
+		"GPUAtomic pipelining stats: slotWait={:.3f} ms",
+		totalSlotWaitMs
+	);
+	// ------------------------------------------------------------
+	// Readback (now guaranteed complete)
+	// ------------------------------------------------------------
+	weights = computeStage->Readback();
+
+	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): done");
 }
 
 void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
@@ -900,6 +1048,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 
 		RecordAndSubmitCubemapRender(
 			cubemapIdx,
+			slot,
 			vertices[cubemapIdx],
 			target,
 			timeline,
@@ -937,7 +1086,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 			computeDone,
 			copyDone
 		);
-		
+
 		computeStage->ConsumeSlot(
 			cubemapIdx,
 			slot,
@@ -961,32 +1110,87 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 		);
 	}
 	weights = computeStage->Readback();
-	
+
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: done");
 }
 
-glm::mat4 CubemapRenderInstance::ComputeCubemapViewMatrix(uint32_t faceIndex, const glm::vec3& pos)
+void CubemapRenderInstance::ComputeCoordinatesCpu(
+	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
-	switch (faceIndex)
+	LOG_DEBUG("Start cpu");
+	auto* computeStage = static_cast<CpuComputeStrategy*>(_computeStage.get());
+	const auto vertices = BuildDeformableVertexPositions();
+
+	const uint32_t end = std::min<uint32_t>(
+		range.first + range.count,
+		static_cast<uint32_t>(vertices.size())
+	);
+	const uint32_t cubemapCount = end - range.first;
+
+	VkSemaphore timeline = _timelines[0];
+	uint64_t& timelineValue = _slotDoneValue[0];
+
+	if (timelineValue > 0)
 	{
-	case 0: return glm::lookAt(pos, pos + glm::vec3(1, 0, 0), glm::vec3(0, -1, 0)); // +X
-	case 1: return glm::lookAt(pos, pos + glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)); // -X
-	case 2: return glm::lookAt(pos, pos + glm::vec3(0, 1, 0), glm::vec3(0, 0, 1));  // +Y
-	case 3: return glm::lookAt(pos, pos + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)); // -Y
-	case 4: return glm::lookAt(pos, pos + glm::vec3(0, 0, 1), glm::vec3(0, -1, 0)); // +Z
-	case 5: return glm::lookAt(pos, pos + glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)); // -Z
-	default: return glm::mat4(1.0f);
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &timeline;
+		waitInfo.pValues = &timelineValue;
+		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
 	}
+	LOG_DEBUG("Start render");
+	uint64_t renderDone = timelineValue;
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		const uint32_t cubemapIdx = range.first + i;
+		CubemapRenderTarget& target = _cubemapRenderUnit.targets[i];
+
+		renderDone = ++timelineValue;
+		RecordAndSubmitCubemapRender(
+			cubemapIdx,
+			i,
+			vertices[cubemapIdx],
+			target,
+			timeline,
+			renderDone
+		);
+
+		computeStage->RecordReadback(i, target, cubemapIdx);
+	}
+	LOG_DEBUG("Readback start");
+	const uint64_t readbackDone = ++timelineValue;
+	computeStage->SubmitAllReadbacks(
+		timeline,
+		renderDone,
+		timeline,
+		readbackDone
+	);
+	
+	VkSemaphoreWaitInfo wait{};
+	wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+	wait.semaphoreCount = 1;
+	wait.pSemaphores = &timeline;
+	wait.pValues = &readbackDone;
+	VK_CHECK(vkWaitSemaphores(_device, &wait, UINT64_MAX));
+	timelineValue = readbackDone;
+	LOG_DEBUG("Compute start");
+	computeStage->ConsumeAllSlots();
+	weights = computeStage->Readback();
 }
 
-uint32_t CubemapRenderInstance::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const
-{
-	VkPhysicalDeviceMemoryProperties memProperties;
-	vkGetPhysicalDeviceMemoryProperties(_device->GetPhysicalDeviceHandle(), &memProperties);
-
-	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
-			return i;
+void CubemapRenderInstance::ComputeCoordinates(
+	const CubemapWorkRange& range, Eigen::MatrixXd& weights) {
+	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
+		ComputeCoordinatesGPUSerial(range, weights);
 	}
-	throw std::runtime_error("Failed to find suitable memory type!");
+	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+		ComputeCoordinatesGPUAtomic(range, weights);
+	}
+	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+		ComputeCoordinatesGPUMP(range, weights);
+	}
+	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+		ComputeCoordinatesCpu(range, weights);
+	}
 }

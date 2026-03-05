@@ -5,6 +5,35 @@
 
 #include <igl/lbs_matrix.h>
 #include <igl/EPS.h>
+#include <fstream>
+
+void WriteWeightsToFile(const std::string& filename, Eigen::MatrixXd _lambdaResults)
+{
+	std::ofstream file(filename);
+	if (!file.is_open())
+		throw std::runtime_error("Failed to open weight write file!");
+
+	const Eigen::Index rows = _lambdaResults.rows();
+	const Eigen::Index cols = _lambdaResults.cols();
+
+	file << "===== LAMBDA BUFFER (rows=" << rows
+		<< ", cols=" << cols << ") =====\n";
+
+	for (Eigen::Index r = 0; r < rows; ++r)
+	{
+		double sum = 0.0;
+
+		for (Eigen::Index c = 0; c < cols; ++c)
+		{
+			const double value = _lambdaResults(r, c);
+			file << "lambda[" << r << "][" << c << "] = " << value << "\n";
+			sum += value;
+		}
+	}
+
+	file.close();
+	LOG_INFO("Weights written to " + filename);
+}
 
 MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation::Execute()
 {
@@ -100,26 +129,18 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 		else if (_params._deformationType == DeformationType::MVC ||_params._deformationType == DeformationType::QMVC || _params._deformationType == DeformationType::MLC ||
 			_params._deformationType == DeformationType::MEC)
 		{
-			const auto& W = _params._weightsData._weights;
-			const auto& C = _params._deformedCage._vertices;
-
-			LOG_DEBUG("About to multiply: W^T ({} x {}) * C ({} x {})",
-				W.cols(), W.rows(),
-				C.rows(), C.cols());
-
-			CheckFormat(
-				W.cols() == C.rows(),
-				"INVALID DIMENSIONS: W^T.cols={} != C.rows={}",
-				W.cols(), C.rows()
-			);
+			//WriteWeightsToFile("mvc", _params._weightsData._weights.transpose());
 			vertexData[i]._vertices = _params._weightsData._weights.transpose() * _params._deformedCage._vertices;
 		}
-		else if (_params._deformationType == DeformationType::PMVCRayracing || _params._deformationType == DeformationType::PMVCLipman) {
-			/*vertexData[i]._vertices =
-				_params._weightsData._weights *
-				_params._deformedCage._vertices;*/
+		else if (DeformationTypeHelpers::PMVCNoOffset(_params._deformationType)) {
+			vertexData[i]._vertices = _params._weightsData._weights * _params._deformedCage._vertices;
+		}
+		else if (DeformationTypeHelpers::PMVCOffset(_params._deformationType)) {
+
+			//Rest data(never modified)
 			const auto& C0 = _params._cage._vertices;
 			const auto& V0 = _params._mesh._vertices;
+
 
 			// Deformed cage
 			const auto& C1 = _params._deformedCage._vertices;
@@ -130,7 +151,7 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 			// 1) Project rest mesh to rest cage
 			Eigen::MatrixXd proj0 = W * C0;
 
-			// 2) Compute offset
+			// 2) Compute offset ONCE
 			Eigen::MatrixXd offset = V0 - proj0;
 
 			// 3) Project onto deformed cage
@@ -138,6 +159,13 @@ MeshComputeDeformationOperation::ExecutionResult MeshComputeDeformationOperation
 
 			// 4) Final vertices
 			vertexData[i]._vertices = proj1 + offset;
+
+			//WriteWeightsToFile("pmvc", _params._weightsData._weights);
+		}
+		else if (_params._deformationType == DeformationType::Raytracing)
+		{
+			LOG_ERROR("PMVCRaytracing not implemented yet!");
+			return ExecutionResult("Failed to compute PMVC deformation");
 		}
 		else if (_params._deformationType == DeformationType::Somigliana)
 		{

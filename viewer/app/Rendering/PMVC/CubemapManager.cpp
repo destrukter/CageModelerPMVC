@@ -25,13 +25,17 @@ void CubemapManager::Initialize()
 {
 	_descriptorPool = CreateRenderResource<DescriptorPool>(_device);
 	CreateCommandPool(_device->GetQueueFamilies()._graphics.value());
-	CreateRenderPass(_format);
+	_renderPass = CreateRenderPass(_format, false);
+	_renderPassCpu = CreateRenderPass(_format, true);
 	CreateDescriptorSetLayouts();
-	CreateCubemapRenderPipeline();
+	_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
+	_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
 	//SphereWeightInitialization(512);
 }
 
-void CubemapManager::CreateRenderPass(VkFormat format) {
+VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer) {
+	VkRenderPass renderPass;
+	
 	VkAttachmentDescription colorAttachment{};
 	colorAttachment.format = format;
 	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -39,18 +43,24 @@ void CubemapManager::CreateRenderPass(VkFormat format) {
 	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	if(!cpuTransfer)
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	else
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = _device->FindDepthFormat();
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	if (!cpuTransfer)
+		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	else
+		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
 	VkAttachmentReference colorAttachmentRef{};
 	colorAttachmentRef.attachment = 0;
@@ -74,6 +84,7 @@ void CubemapManager::CreateRenderPass(VkFormat format) {
 	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
+
 	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -84,9 +95,10 @@ void CubemapManager::CreateRenderPass(VkFormat format) {
 	renderPassInfo.dependencyCount = 1;
 	renderPassInfo.pDependencies = &dependency;
 
-	if (vkCreateRenderPass(_device, &renderPassInfo, nullptr, &_renderPass) != VK_SUCCESS) {
+	if (vkCreateRenderPass(_device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create Cubemap render pass!");
 	}
+	return renderPass;
 }
 
 void CubemapManager::CreateDescriptorSetLayouts() {
@@ -101,7 +113,7 @@ void CubemapManager::CreateDescriptorSetLayouts() {
 	_matricesLayout = _descriptorPool->CreateDescriptorSetLayout(layoutBindings);
 }
 
-void CubemapManager::CreateCubemapRenderPipeline()
+PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer)
 {
 	VkVertexInputBindingDescription bindingDesc{};
 	bindingDesc.binding = 0;
@@ -174,9 +186,15 @@ void CubemapManager::CreateCubemapRenderPipeline()
 	pushConstantRange.offset = 0;
 	pushConstantRange.size = sizeof(CubemapPushConstants);
 
+	VkRenderPass renderPass;
+	if(!cpuTransfer)
+		renderPass = _renderPass;
+	else
+		renderPass = _renderPassCpu;
+
 	// Build the pipeline
-	_cubemapPipelineHandle = _renderPipelineManager->BeginPipeline()
-		.SetRenderPass(_renderPass)
+	return _renderPipelineManager->BeginPipeline()
+		.SetRenderPass(renderPass)
 		.SetColorBlendAttachments(std::span(&colorBlendAttachment, 1))
 		.SetDepthStencilState(depthStencil)
 		.SetDescriptorSetLayouts(std::span(descriptorSetLayouts))
@@ -335,7 +353,7 @@ void CubemapManager::EndOneTimeCommands(VkCommandBuffer cmd) {
 		_cubemapSize,
 		_format,
 		ComputeType::DEBUGCUBEMAPS
-	);
+	);F
 
 	// 3. Build work range
 	CubemapWorkRange range{};
@@ -375,7 +393,7 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 	}
 }
 
-MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates() {
+MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(DeformationType deformationType) {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
 	assert(_resourceManager && "ResourceManager is null");
@@ -383,11 +401,15 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	assert(_matricesLayout && "MatricesLayout is null");
 	CreateVertexBufferFromMesh();
 	CreateIndexBufferFromMesh();
+
+
+
+
 	CubemapRenderInstance instance(
 		*this,
 		_cubemapSize,
 		_format,
-		ComputeType::GPUSERIAL,
+		deformationType,
 
 		_device,
 		_descriptorPool,
@@ -399,7 +421,9 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 
 		_graphicCommandPool,
 		_renderPass,
+		_renderPassCpu,
 		_cubemapPipelineHandle,
+		_cubemapPipelineHandleCpu,
 
 		_matricesLayout,
 
@@ -410,7 +434,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	range.first = 0;
 	range.count = static_cast<uint32_t>(_deformableMesh._vertices.rows());
 	Eigen::MatrixXd weights;
-	instance.ComputeCoordinatesGPUSerial(range, weights);
+	instance.ComputeCoordinates(range, weights);
 	Eigen::MatrixXd M = weights;
 	Eigen::MatrixXd interpolatedWeights;
 	Eigen::MatrixXd psi;

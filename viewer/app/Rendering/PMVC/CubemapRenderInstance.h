@@ -10,21 +10,13 @@
 #include <glm/vec3.hpp>
 #include <Mesh/GeometryUtils.h>
 #include <Rendering/PMVC/CubemapManager.h>
+//#include <Rendering/PMVC/CubemapRenderInstance.h>
+#include <Rendering/PMVC/SphereWeightCalculator.h>
+#include <Mesh/Operations/MeshWeightsParams.h>
 
 
 class CubemapManager;
 struct CubemapWorkRange;
-
-class SphereWeightCalculator {
-public:
-	VkImage        _solidAngleImage = VK_NULL_HANDLE;
-	VkDeviceMemory _solidAngleMemory = VK_NULL_HANDLE;
-	VkImageView    _solidAngleArrayView = VK_NULL_HANDLE;
-	VkSampler      _solidAngleSampler = VK_NULL_HANDLE;
-	SphereWeightCalculator() = default;
-	void SphereWeightInitialization(uint32_t size, RenderResourceRef<Device> device, std::shared_ptr<RenderResourceManager> resourceManager, VkCommandPool commandPool);
-	float ComputeSphereWeight(int px, int py, int faceSize, int face);
-};
 
 struct CubemapRenderTarget
 {
@@ -35,17 +27,17 @@ struct CubemapRenderTarget
 
 	VkImage        depthImage;
 	VkDeviceMemory depthMemory;
+	VkImageView    depthView;
 	std::array<VkImageView, 6> depthViews;
-
+	
 	std::array<VkFramebuffer, 6> framebuffers;
-
 };
 
 struct CubemapRenderUnit
 {
 	std::vector<CubemapRenderTarget> targets;
 
-	std::array<VkCommandBuffer, 6> graphicsCmd;
+	std::vector<std::array<VkCommandBuffer, 6>> graphicsCmdPerTarget;
 
 	MemoryMappedBuffer matricesUBO;
 	VkDescriptorSet    matricesDescriptorSet;
@@ -56,7 +48,8 @@ enum class ComputeType {
 	GPUATOMIC,
 	//GPUSORT,
 	DEBUGCUBEMAPS, // for debugging writes cupemaps to disk no compute
-	GPUSERIAL 
+	GPUSERIAL ,
+	GPUMP
 	// TODO: implement if time leftover
 };
 
@@ -77,7 +70,7 @@ public:
 		CubemapManager& cubemapManager,
 		int cubemapSize,
 		VkFormat format,
-		ComputeType computeType,
+		DeformationType deformationType,
 
 		RenderResourceRef<Device> device,
 		RenderResourceRef<DescriptorPool> descriptorPool,
@@ -89,7 +82,9 @@ public:
 
 		VkCommandPool graphicsCommandPool,
 		VkRenderPass renderPass,
+		VkRenderPass renderPassCpu,
 		PipelineHandle cubemapPipelineHandle,
+		PipelineHandle cubemapPipelineHandleCpu,
 
 		RenderResourceRef<DescriptorSetLayout> matricesLayout,
 
@@ -101,16 +96,24 @@ public:
 	//CubemapRenderInstance& operator=(CubemapRenderInstance&) = default;
 
 	void ComputeCoordinatesGPUSerial(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
+	void ComputeCoordinatesGPUAtomic(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
+	void ComputeCoordinatesGPUMP(
+		const CubemapWorkRange& range,
+		Eigen::MatrixXd& weights);
+	void ComputeCoordinates(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 
 private:
 	//CubemapManager& _cubemapManager;
 
 	std::unique_ptr<ICubemapComputeStrategy> _computeStage;
 	
+	//offset
+	float _offset;
+
 	//parameters 
 	unsigned int _cubemapSize;
 	VkFormat _format;
-	ComputeType _computeType;
+	DeformationType _deformationType;
 
 	//init functions
 	void Initialize();
@@ -121,9 +124,12 @@ private:
 	void UpdateMatricesDescriptorSet();
 	void CreateSyncObjects();
 
-	void RecordAndSubmitCubemapRender(uint32_t cubemapIdx, const glm::vec3& camPos, 
+	void RecordAndSubmitCubemapRender(uint32_t cubemapIdx, uint32_t targetIndex, const glm::vec3& camPos,
 		CubemapRenderTarget& target, VkSemaphore timeline, uint64_t signalValue); //TODO submit cubemap at once not in 6 parts
 	std::vector<glm::vec3> BuildDeformableVertexPositions() const;
+
+	void ComputeCoordinatesCpu(
+		const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 
 	//render resources
 	CubemapRenderUnit _cubemapRenderUnit;
@@ -146,7 +152,9 @@ private:
 	EigenMesh _deformableMesh;
 	VkCommandPool _graphicsCommandPool;
 	VkRenderPass _renderPass;
+	VkRenderPass _renderPassCpu;
 	PipelineHandle _cubemapPipelineHandle;
+	PipelineHandle _cubemapPipelineHandleCpu;
 	RenderResourceRef<DescriptorSetLayout>  _matricesLayout;
 	MemoryMappedBuffer _indexBuffer;
 	MemoryMappedBuffer _vertexBuffer;

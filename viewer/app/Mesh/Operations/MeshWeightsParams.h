@@ -20,8 +20,15 @@ enum class DeformationType : uint8_t
 	Green,
 	QGC,
 	Somigliana,
-	PMVCLipman,
-	PMVCRayracing
+	PMVCSerialOffset,
+	PMVCSerialNoOffset,
+	PMVCRingOffset,
+	PMVCRingNoOffset,
+	PMVCAllOffset,
+	PMVCAllNoOffset,
+	PMVCCpuOffset,
+	PMVCCpuNoOffset,
+	Raytracing
 };
 
 struct DeformationTypeHelpers
@@ -69,19 +76,62 @@ struct DeformationTypeHelpers
 		{
 			return "Somigliana";
 		}
-		else if (deformationType == DeformationType::PMVCLipman)
+		else if (deformationType == DeformationType::PMVCAllNoOffset)
 		{
-			return "PMVCLipman";
+			return "PMVCAllNoOffset";
 		}
-		else if (deformationType == DeformationType::PMVCRayracing)
+		else if (deformationType == DeformationType::PMVCAllOffset)
 		{
-			return "PMVCRayracing";
+			return "PMVCAllOffset";
+		}
+		else if (deformationType == DeformationType::PMVCCpuNoOffset)
+		{
+			return "PMVCCpuNoOffset";
+		}
+		else if (deformationType == DeformationType::PMVCCpuOffset)
+		{
+			return "PMVCCpuOffset";
+		}
+		else if (deformationType == DeformationType::PMVCRingNoOffset)
+		{
+			return "PMVCRingNoOffset";
+		}
+		else if (deformationType == DeformationType::PMVCRingOffset)
+		{
+			return "PMVCRingOffset";
+		}
+		else if (deformationType == DeformationType::PMVCSerialNoOffset)
+		{
+			return "PMVCSerialNoOffset";
+		}
+		else if (deformationType == DeformationType::PMVCSerialOffset)
+		{
+			return "PMVCSerialOffset";
+		}
+		else if (deformationType == DeformationType::Raytracing)
+		{
+			return "Raytracing";
 		}
 
 		return { };
 	}
 
 	[[nodiscard]] static bool RequiresEmbedding(const DeformationType deformationType)
+	{
+		return deformationType == DeformationType::LBC || deformationType == DeformationType::Harmonic || deformationType == DeformationType::BBW;
+	}
+	[[nodiscard]] static bool IsPMVC(const DeformationType deformationType)
+	{
+		return PMVCOffset(deformationType) || PMVCNoOffset(deformationType);
+	}
+	[[nodiscard]] static bool PMVCOffset(const DeformationType deformationType)
+	{
+		return deformationType == DeformationType::PMVCSerialOffset || deformationType == DeformationType::PMVCRingOffset || deformationType == DeformationType::PMVCAllOffset || deformationType == DeformationType::PMVCCpuOffset;
+	}
+	[[nodiscard]] static bool PMVCNoOffset(const DeformationType deformationType) {
+		return deformationType == DeformationType::PMVCSerialNoOffset || deformationType == DeformationType::PMVCRingNoOffset || deformationType == DeformationType::PMVCAllNoOffset || deformationType == DeformationType::PMVCCpuNoOffset;
+	}
+	[[nodiscard]] static bool CanInterpolateWeights(const DeformationType deformationType)
 	{
 		return deformationType == DeformationType::LBC || deformationType == DeformationType::Harmonic || deformationType == DeformationType::BBW;
 	}

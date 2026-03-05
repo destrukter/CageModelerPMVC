@@ -8,12 +8,14 @@
 #include <Rendering/Core/DescriptorPool.h>
 #include <Rendering/Core/RenderResourceManager.h>
 #include <Rendering/PMVC/CubemapRenderInstance.h>
-//#include <Rendering/PMVC/SphereWeightCalculator.h>
+#include <Rendering/PMVC/SphereWeightCalculator.h>
 
-class GpuSerialComputeStrategy final : public ICubemapComputeStrategy
+//class SphereWeightCalculator;
+
+class GpuMPComputeStrategy final : public ICubemapComputeStrategy
 {
 public:
-    GpuSerialComputeStrategy(
+    GpuMPComputeStrategy(
         RenderResourceRef<Device> device,
         uint32_t transferQueueFamily,
         uint32_t faceSize,
@@ -63,6 +65,26 @@ public:
         uint64_t waitValue,
         uint64_t signalValue);
 
+    //new
+    void RecordCompute(
+        uint32_t slot,
+        const CubemapRenderTarget& target,
+        uint32_t deformableIndex);
+
+    void SubmitAllComputes(
+        VkSemaphore waitSemaphore,
+        uint64_t waitValue,
+        VkSemaphore signalSemaphore,
+        uint64_t signalValue);
+
+    void SubmitAllReadbackCopies(
+        VkSemaphore waitSemaphore,
+        uint64_t waitValue,
+        VkSemaphore signalSemaphore,
+        uint64_t signalValue);
+
+    void ConsumeAllSlots();
+
 private:
     void CreatePipelineAndLayouts();
     void AllocateResources();
@@ -96,7 +118,7 @@ private:
     std::vector<SlotBuffers> _slots;
 
     // CPU-side result storage
-    std::vector<std::vector<float>> _lambdaResults;
+    Eigen::MatrixXd _lambdaResults;
     std::vector<float> _wsumResults;
 
     EigenMesh& _cageMesh;
@@ -111,14 +133,16 @@ private:
     SphereWeightCalculator _sphereWeightCalculator;
 
     void CreateSampler();
-    void CreateDepthSampler();
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void WriteWeightsToFile(const std::string& filename);
 
-    int _targetCount = 1;
-
-	bool _offset = false;
+    int _targetCount = 3;
 
     VkSampler _barySampler;
+
+    bool _offset = false;
+    void CreateDepthSampler();
     VkSampler _depthSampler;
+
+    std::vector<uint32_t> _slotToDeformableIndex;
 };
