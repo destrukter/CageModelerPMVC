@@ -115,7 +115,14 @@ void CubemapRenderInstance::Initialize() {
 		);
 	}
 	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
-		_computeStage = std::make_unique<CpuComputeStrategy>();
+		_computeStage = std::make_unique<CpuComputeStrategy>(
+			_device,
+			_device->GetQueueFamilies()._graphics.value(),
+			_cubemapSize,
+			_format,
+			_cageMesh,
+			_deformableMesh
+		);
 		/*
 		VkQueue transferQueue;
 		vkGetDeviceQueue(
@@ -260,7 +267,8 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-		VK_IMAGE_USAGE_SAMPLED_BIT;
+		VK_IMAGE_USAGE_SAMPLED_BIT |
+		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImage));
@@ -1104,7 +1112,52 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 void CubemapRenderInstance::ComputeCoordinatesCpu(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	auto* computeStage =
+		static_cast<CpuComputeStrategy*>(_computeStage.get());
 
+	const auto vertices = BuildDeformableVertexPositions();
+
+	const uint32_t end = std::min<uint32_t>(
+		range.first + range.count,
+		static_cast<uint32_t>(vertices.size())
+	);
+
+	constexpr uint32_t slot = 0;
+	CubemapRenderTarget& target =
+		_cubemapRenderUnit.targets[slot];
+
+	VkSemaphore timeline = _timelines[slot];
+	uint64_t& timelineValue = _slotDoneValue[slot];
+
+	for (uint32_t cubemapIdx = range.first; cubemapIdx < end; ++cubemapIdx)
+	{
+		const uint64_t renderDone = ++timelineValue;
+
+		RecordAndSubmitCubemapRender(
+			cubemapIdx,
+			slot,
+			vertices[cubemapIdx],
+			target,
+			timeline,
+			renderDone
+		);
+
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &timeline;
+		waitInfo.pValues = &renderDone;
+		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+
+		computeStage->DispatchAfterRender(
+			cubemapIdx,
+			slot,
+			timeline,
+			target
+		);
+	}
+
+	weights = computeStage->Readback();
 }
 
 void CubemapRenderInstance::ComputeCoordinates(
