@@ -98,10 +98,11 @@ Editor::Editor(const SubsystemPtr<InputSubsystem>& inputSubsystem,
 		}});
 }
 
-void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, const std::shared_ptr<CubemapManager>& cubemapRenderer)
+void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, const std::shared_ptr<CubemapManager>& cubemapRenderer, const std::shared_ptr<Raytracer>& raytracer)
 {
 	_scene = std::make_unique<Scene>(sceneRenderer);
 	_cubemapRenderer = cubemapRenderer;
+	_raytracer = raytracer;
 
 	// Sets up all the scene lights before initializing the renderer. Hacky!
 	CreateSceneLights();
@@ -132,7 +133,7 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCancelled(); },
 		[this] { OnNewProjectCreated(); });
 
-	_projectModel->_deformationType = DeformationType::PMVCCpuOffset;
+	_projectModel->_deformationType = DeformationType::PMVCRayracing;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
 	_projectModel->_meshFilepath = "assets/meshes/armadilloman.obj";
@@ -521,6 +522,20 @@ void Editor::OnNewProjectCreated()
 				//_cubemapRenderer->ComputeCoordinates(weightMatrix);
 				
 				p.set_value(_cubemapRenderer->ComputeCoordinates());
+			}
+			);
+		}
+		else if (_projectModel.get()->_deformationType == DeformationType::PMVCRayracing) {
+			_mainThreadQueue->Push(
+				[this, projectResult, p = std::move(promise), &weightMatrix]() mutable {
+				_raytracer->SetCage(projectResult.GetValue()->_cage);
+				_raytracer->SetMesh(projectResult.GetValue()->_mesh);
+				_raytracer->Initialize();
+				//_cubemapRenderer->ComputeCoordinates(weightMatrix);
+
+				p.set_value(_raytracer->ComputeCoordinates());
+				//projectResult.GetValue()->_deformationType = DeformationType::MVC;
+				//p.set_value(ComputeCageWeights(*projectResult.GetValue()));
 			}
 			);
 		}

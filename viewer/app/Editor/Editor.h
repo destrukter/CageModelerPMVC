@@ -9,6 +9,7 @@
 #include <Thread/ThreadPool.h>
 #include <Tools/Tool.h>
 #include <Rendering//PMVC/CubemapRenderInstance.h>
+#include <Rendering/PMVC/Raytracer.h>
 
 class ProjectSettingsPanel;
 class ProjectOptionsPanel;
@@ -23,6 +24,7 @@ class StatusBar;
 class RenderPipelineManager;
 class InputSubsystem;
 class CubemapManager;
+class Raytracer;
 
 /**
  * This class serves as a mediator between the user interface backend and the current state of the application.
@@ -35,7 +37,7 @@ public:
 	Editor(const SubsystemPtr<InputSubsystem>& inputSubsystem,
 		const SubsystemPtr<CameraSubsystem>& cameraSubsystem);
 
-	void Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, const std::shared_ptr<CubemapManager>& cubemapRenderer);
+	void Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, const std::shared_ptr<CubemapManager>& cubemapRenderer, const std::shared_ptr<Raytracer>& raytracer);
 
 	void RecordUI();
 
@@ -220,6 +222,8 @@ private:
 	std::unique_ptr<Scene> _scene = nullptr;
 
 	std::shared_ptr<CubemapManager> _cubemapRenderer = nullptr;
+
+	std::shared_ptr<Raytracer> _raytracer = nullptr;
 
 	/// All gizmos in the scene.
 	std::shared_ptr<Gizmo> _gizmo;
