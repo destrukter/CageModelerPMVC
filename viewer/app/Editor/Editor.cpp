@@ -133,7 +133,7 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCancelled(); },
 		[this] { OnNewProjectCreated(); });
 
-	_projectModel->_deformationType = DeformationType::PMVCRayracing;
+	_projectModel->_deformationType = DeformationType::Raytracing;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
 	_projectModel->_meshFilepath = "assets/meshes/armadilloman.obj";
@@ -563,6 +563,16 @@ void Editor::OnNewProjectCreated()
 			);
 		}
 		else if (_projectModel->_deformationType == DeformationType::Raytracing) {
+			auto promise = std::make_shared<std::promise<WeightsResult>>();
+			future = promise->get_future();
+			_mainThreadQueue->Push(
+				[this, projectResult, promise]() mutable {
+				_raytracer->SetCage(projectResult.GetValue()->_cage);
+				_raytracer->SetMesh(projectResult.GetValue()->_mesh);
+				_raytracer->Initialize();
+				promise->set_value(_raytracer->ComputeCoordinates());
+			}
+			);
 
 		}
 		else {
