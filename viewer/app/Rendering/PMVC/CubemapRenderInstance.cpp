@@ -413,6 +413,15 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 					flatBuffers[target * 6 + face];
 			}
 		}
+
+		unit.graphicsSubmitInfos.resize(flatBuffers.size());
+		for (size_t i = 0; i < flatBuffers.size(); ++i)
+		{
+			unit.graphicsSubmitInfos[i] = VkCommandBufferSubmitInfo{
+				.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+				.commandBuffer = flatBuffers[i]
+			};
+		}
 	}
 	/*VkCommandBufferAllocateInfo cmdAllocInfo{
 		VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
@@ -460,13 +469,10 @@ void CubemapRenderInstance::UpdateMatricesDescriptorSet()
 	vkUpdateDescriptorSets(_device, 1, &write, 0, nullptr);
 }
 
-void CubemapRenderInstance::RecordAndSubmitCubemapRender(
-	uint32_t cubemapIdx,
+void CubemapRenderInstance::RecordCubemapRender(
 	uint32_t targetIndex,
 	const glm::vec3& camPos,
-	CubemapRenderTarget& target,
-	VkSemaphore timeline,
-	uint64_t signalValue)
+	CubemapRenderTarget& target)
 {
 	assert(targetIndex < _cubemapRenderUnit.graphicsCmdPerTarget.size());
 
@@ -483,22 +489,6 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		_renderPipelineManager->GetPipelineObject(
 			_cubemapPipelineHandle);
 
-	// ---------------------------------------------------------------------
-	// Update shared UBO (outside render loop)
-	// ---------------------------------------------------------------------
-	const uint32_t numTriangles =
-		static_cast<uint32_t>(_cageMesh._faces.size() / 3);
-
-	CubemapMatricesUBO ubo{};
-	ubo.invNumTriangles = 1.0f / float(numTriangles);
-	std::memcpy(
-		_cubemapRenderUnit.matricesUBO._mappedData,
-		&ubo,
-		sizeof(ubo));
-
-	// =====================================================================
-	// GRAPHICS CMDS — one per face
-	// =====================================================================
 	for (uint32_t face = 0; face < 6; ++face)
 	{
 		VkCommandBuffer cmd = _cubemapRenderUnit.graphicsCmdPerTarget[targetIndex][face];
@@ -555,19 +545,18 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		vkCmdEndRenderPass(cmd);
 		VK_CHECK(vkEndCommandBuffer(cmd));
 	}
+}
 
-	// =====================================================================
-	// SUBMIT
-	// =====================================================================
-	std::array<VkCommandBufferSubmitInfo, 6> cmdInfos{};
+void CubemapRenderInstance::SubmitCubemapRendersBatch(
+	uint32_t targetCount,
+	VkSemaphore timeline,
+	uint64_t signalValue)
+{
+	if (targetCount == 0)
+		return;
 
-	for (uint32_t i = 0; i < 6; ++i) {
-		cmdInfos[i] = {
-			VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-			nullptr,
-			_cubemapRenderUnit.graphicsCmdPerTarget[targetIndex][i]
-		};
-	}
+	const uint32_t cmdCount = targetCount * 6;
+	assert(cmdCount <= _cubemapRenderUnit.graphicsSubmitInfos.size());
 
 	VkSemaphoreSubmitInfo signalInfo{
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -578,8 +567,8 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 
 	VkSubmitInfo2 submit{
 		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-		.commandBufferInfoCount = uint32_t(cmdInfos.size()),
-		.pCommandBufferInfos = cmdInfos.data(),
+		.commandBufferInfoCount = cmdCount,
+		.pCommandBufferInfos = _cubemapRenderUnit.graphicsSubmitInfos.data(),
 		.signalSemaphoreInfoCount = 1,
 		.pSignalSemaphoreInfos = &signalInfo
 	};
@@ -592,6 +581,29 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		&graphicsQueue);
 
 	VK_CHECK(vkQueueSubmit2(graphicsQueue, 1, &submit, VK_NULL_HANDLE));
+}
+
+void CubemapRenderInstance::RecordAndSubmitCubemapRender(
+	uint32_t cubemapIdx,
+	uint32_t targetIndex,
+	const glm::vec3& camPos,
+	CubemapRenderTarget& target,
+	VkSemaphore timeline,
+	uint64_t signalValue)
+{
+	(void)cubemapIdx;
+	const uint32_t numTriangles =
+		static_cast<uint32_t>(_cageMesh._faces.size() / 3);
+
+	CubemapMatricesUBO ubo{};
+	ubo.invNumTriangles = 1.0f / float(numTriangles);
+	std::memcpy(
+		_cubemapRenderUnit.matricesUBO._mappedData,
+		&ubo,
+		sizeof(ubo));
+
+	RecordCubemapRender(targetIndex, camPos, target);
+	SubmitCubemapRendersBatch(1, timeline, signalValue);
 }
 
 void CubemapRenderInstance::CreateSyncObjects()
@@ -708,16 +720,6 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		waitInfo.pValues = &timelineValue;
 		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
 	}
-
-	if (timelineValue > 0)
-	{
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
-		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
-	}
 	// ============================================================
 	// Phase 1: Render ALL cubemaps
 	// ============================================================
@@ -730,22 +732,21 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		waitSeconds * 1000.0);
 
 	waitTemp = std::chrono::high_resolution_clock::now();
+	const uint32_t numTriangles =
+		static_cast<uint32_t>(_cageMesh._faces.size() / 3);
+	CubemapMatricesUBO ubo{};
+	ubo.invNumTriangles = 1.0f / float(numTriangles);
+	std::memcpy(_cubemapRenderUnit.matricesUBO._mappedData, &ubo, sizeof(ubo));
+
 	for (uint32_t i = 0; i < cubemapCount; ++i)
 	{
 		const uint32_t cubemapIdx = range.first + i;
-		CubemapRenderTarget& target =
-			_cubemapRenderUnit.targets[i];
-		renderDone = ++timelineValue;
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			i,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone
-		);
+		CubemapRenderTarget& target = _cubemapRenderUnit.targets[i];
+		RecordCubemapRender(i, vertices[cubemapIdx], target);
 	}
-	LOG_DEBUG("Cubemap Renders submitted");
+	renderDone = ++timelineValue;
+	SubmitCubemapRendersBatch(cubemapCount, timeline, renderDone);
+	LOG_DEBUG("Cubemap Renders submitted (batched)");
 	waitSeconds = SecondsSince(waitTemp);
 	LOG_DEBUG(
 		"Total time={:.6f} ms",
@@ -754,6 +755,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	// Phase 2: Record ALL compute command buffers
 	// ============================================================
 	waitTemp = std::chrono::high_resolution_clock::now();
+	computeStage->BeginBatchedRecording(cubemapCount);
 	for (uint32_t i = 0; i < cubemapCount; ++i)
 	{
 		computeStage->RecordCompute(

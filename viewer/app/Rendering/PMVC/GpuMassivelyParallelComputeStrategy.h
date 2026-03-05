@@ -71,6 +71,8 @@ public:
         const CubemapRenderTarget& target,
         uint32_t deformableIndex);
 
+    void BeginBatchedRecording(uint32_t activeSlotCount);
+
     void SubmitAllComputes(
         VkSemaphore waitSemaphore,
         uint64_t waitValue,
@@ -145,4 +147,14 @@ private:
     VkSampler _depthSampler;
 
     std::vector<uint32_t> _slotToDeformableIndex;
+
+    struct PendingDispatch
+    {
+        uint32_t slot = 0;
+        uint32_t deformableIndex = 0;
+        CubemapRenderTarget target{};
+    };
+
+    uint32_t _activeSlotCount = 0;
+    std::vector<PendingDispatch> _pendingDispatches;
 };

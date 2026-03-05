@@ -1,6 +1,7 @@
 #include <Rendering/PMVC/GpuMassivelyParallelComputeStrategy.h>
 #include <Rendering/PMVC/ScopedCmdBuffer.h>
 #include <Rendering/PMVC/CubemapRenderInstance.h>
+#include <algorithm>
 
 uint32_t GpuMPComputeStrategy::RequiredRenderTargetCount() const
 {
@@ -595,7 +596,7 @@ void GpuMPComputeStrategy::CreateSampler() {
 	samplerInfo.maxLod = 0.0f;
 	samplerInfo.mipLodBias = 0.0f;
 
-	// Clamp (doesn’t really matter since texelFetch ignores addressing)
+	// Clamp (doesnÂ’t really matter since texelFetch ignores addressing)
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -721,37 +722,53 @@ void GpuMPComputeStrategy::CreateDepthSampler() {
 	vkCreateSampler(_device, &samplerInfo, nullptr, &_depthSampler);
 }
 
+void GpuMPComputeStrategy::BeginBatchedRecording(uint32_t activeSlotCount)
+{
+	_activeSlotCount = std::min<uint32_t>(activeSlotCount, static_cast<uint32_t>(_computeCommandBuffers.size()));
+	_pendingDispatches.clear();
+	_pendingDispatches.reserve(_activeSlotCount);
+
+	for (uint32_t i = 0; i < _activeSlotCount; ++i)
+		_slotToDeformableIndex[i] = UINT32_MAX;
+}
+
 void GpuMPComputeStrategy::RecordCompute(
 	uint32_t slot,
 	const CubemapRenderTarget& target,
 	uint32_t deformableIndex)
 {
-	assert(slot < _computeCommandBuffers.size());
+	assert(slot < _activeSlotCount);
 	assert(slot < _computeDescriptorSets.size());
 	assert(slot < _slotToDeformableIndex.size());
 
 	_slotToDeformableIndex[slot] = deformableIndex;
+	_pendingDispatches.push_back(PendingDispatch{
+		.slot = slot,
+		.deformableIndex = deformableIndex,
+		.target = target
+	});
+}
 
-	VkCommandBuffer cmd = _computeCommandBuffers[slot];
+void GpuMPComputeStrategy::SubmitAllComputes(
+	VkSemaphore waitSemaphore,
+	uint64_t waitValue,
+	VkSemaphore signalSemaphore,
+	uint64_t signalValue)
+{
+	if (_pendingDispatches.empty())
+		return;
+
+	VkCommandBuffer cmd = _computeCommandBuffers[0];
 	VK_CHECK(vkResetCommandBuffer(cmd, 0));
 
-	VkCommandBufferBeginInfo begin{
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+	VkCommandBufferBeginInfo beginInfo{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	};
-	VK_CHECK(vkBeginCommandBuffer(cmd, &begin));
-
-	UpdateComputeDescriptorSet(slot, target);
+	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
 	auto& pipe = _renderPipelineManager->GetPipelineObject(_computePipeline);
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe._handle);
-	vkCmdBindDescriptorSets(
-		cmd,
-		VK_PIPELINE_BIND_POINT_COMPUTE,
-		pipe._pipelineLayout,
-		0, 1,
-		&_computeDescriptorSets[slot],
-		0, nullptr
-	);
 
 	ComputePushConstants pc{};
 	pc.uFaceSize = { (int)_faceSize, (int)_faceSize };
@@ -764,71 +781,74 @@ void GpuMPComputeStrategy::RecordCompute(
 		0, sizeof(pc), &pc
 	);
 
-	vkCmdFillBuffer(cmd, _slots[slot].lambda._deviceBuffer, 0, VK_WHOLE_SIZE, 0);
-	vkCmdFillBuffer(cmd, _slots[slot].wsum._deviceBuffer, 0, VK_WHOLE_SIZE, 0);
-
-	VkBufferMemoryBarrier clearBarrier[2]{};
-	for (int i = 0; i < 2; ++i)
+	for (const PendingDispatch& dispatch : _pendingDispatches)
 	{
-		clearBarrier[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-		clearBarrier[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-		clearBarrier[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		clearBarrier[i].offset = 0;
-		clearBarrier[i].size = VK_WHOLE_SIZE;
+		UpdateComputeDescriptorSet(dispatch.slot, dispatch.target);
+
+		vkCmdBindDescriptorSets(
+			cmd,
+			VK_PIPELINE_BIND_POINT_COMPUTE,
+			pipe._pipelineLayout,
+			0, 1,
+			&_computeDescriptorSets[dispatch.slot],
+			0, nullptr
+		);
+
+		vkCmdFillBuffer(cmd, _slots[dispatch.slot].lambda._deviceBuffer, 0, VK_WHOLE_SIZE, 0);
+		vkCmdFillBuffer(cmd, _slots[dispatch.slot].wsum._deviceBuffer, 0, VK_WHOLE_SIZE, 0);
+
+		VkBufferMemoryBarrier clearBarrier[2]{};
+		for (int i = 0; i < 2; ++i)
+		{
+			clearBarrier[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+			clearBarrier[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			clearBarrier[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			clearBarrier[i].offset = 0;
+			clearBarrier[i].size = VK_WHOLE_SIZE;
+		}
+
+		clearBarrier[0].buffer = _slots[dispatch.slot].lambda._deviceBuffer;
+		clearBarrier[1].buffer = _slots[dispatch.slot].wsum._deviceBuffer;
+
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0,
+			0, nullptr,
+			2, clearBarrier,
+			0, nullptr
+		);
+
+		uint32_t groupsX = (_faceSize + kDispatchGroupSize - 1) / kDispatchGroupSize;
+		uint32_t groupsY = (_faceSize + kDispatchGroupSize - 1) / kDispatchGroupSize;
+		vkCmdDispatch(cmd, groupsX, groupsY, 6);
+
+		VkBufferMemoryBarrier postBarrier[2]{};
+		for (int i = 0; i < 2; ++i)
+		{
+			postBarrier[i] = clearBarrier[i];
+			postBarrier[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			postBarrier[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		}
+
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0,
+			0, nullptr,
+			2, postBarrier,
+			0, nullptr
+		);
 	}
-
-	clearBarrier[0].buffer = _slots[slot].lambda._deviceBuffer;
-	clearBarrier[1].buffer = _slots[slot].wsum._deviceBuffer;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		0,
-		0, nullptr,
-		2, clearBarrier,
-		0, nullptr
-	);
-
-	uint32_t groupsX = (_faceSize + kDispatchGroupSize - 1) / kDispatchGroupSize;
-	uint32_t groupsY = (_faceSize + kDispatchGroupSize - 1) / kDispatchGroupSize;
-	vkCmdDispatch(cmd, groupsX, groupsY, 6);
-
-	VkBufferMemoryBarrier postBarrier[2]{};
-	for (int i = 0; i < 2; ++i)
-	{
-		postBarrier[i] = clearBarrier[i];
-		postBarrier[i].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		postBarrier[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	}
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		0,
-		0, nullptr,
-		2, postBarrier,
-		0, nullptr
-	);
 
 	VK_CHECK(vkEndCommandBuffer(cmd));
-}
 
-void GpuMPComputeStrategy::SubmitAllComputes(
-	VkSemaphore waitSemaphore,
-	uint64_t waitValue,
-	VkSemaphore signalSemaphore,
-	uint64_t signalValue)
-{
-	std::vector<VkCommandBufferSubmitInfo> cmdInfos(_computeCommandBuffers.size());
-	for (size_t i = 0; i < _computeCommandBuffers.size(); ++i)
-	{
-		cmdInfos[i] = {
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-			.commandBuffer = _computeCommandBuffers[i]
-		};
-	}
+	VkCommandBufferSubmitInfo cmdInfo{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+		.commandBuffer = cmd
+	};
 
 	VkSemaphoreSubmitInfo waitInfo{
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -848,8 +868,8 @@ void GpuMPComputeStrategy::SubmitAllComputes(
 		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
 		.waitSemaphoreInfoCount = 1,
 		.pWaitSemaphoreInfos = &waitInfo,
-		.commandBufferInfoCount = static_cast<uint32_t>(cmdInfos.size()),
-		.pCommandBufferInfos = cmdInfos.data(),
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &cmdInfo,
 		.signalSemaphoreInfoCount = 1,
 		.pSignalSemaphoreInfos = &signalInfo
 	};
@@ -865,17 +885,20 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 	VkSemaphore signalSemaphore,
 	uint64_t signalValue)
 {
-	for (uint32_t slot = 0; slot < _copyCommandBuffers.size(); ++slot)
+	if (_activeSlotCount == 0)
+		return;
+
+	VkCommandBuffer cmd = _copyCommandBuffers[0];
+	VK_CHECK(vkResetCommandBuffer(cmd, 0));
+
+	VkCommandBufferBeginInfo beginInfo{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+	};
+	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+	for (uint32_t slot = 0; slot < _activeSlotCount; ++slot)
 	{
-		VkCommandBuffer cmd = _copyCommandBuffers[slot];
-		VK_CHECK(vkResetCommandBuffer(cmd, 0));
-
-		VkCommandBufferBeginInfo beginInfo{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-		};
-		VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-
 		VkBufferCopy lambdaCopy{
 			.srcOffset = 0,
 			.dstOffset = 0,
@@ -890,18 +913,14 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 
 		vkCmdCopyBuffer(cmd, _slots[slot].lambda._deviceBuffer, _slots[slot].lambdaStaging._deviceBuffer, 1, &lambdaCopy);
 		vkCmdCopyBuffer(cmd, _slots[slot].wsum._deviceBuffer, _slots[slot].wsumStaging._deviceBuffer, 1, &wsumCopy);
-
-		VK_CHECK(vkEndCommandBuffer(cmd));
 	}
 
-	std::vector<VkCommandBufferSubmitInfo> cmdInfos(_copyCommandBuffers.size());
-	for (size_t i = 0; i < _copyCommandBuffers.size(); ++i)
-	{
-		cmdInfos[i] = {
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-			.commandBuffer = _copyCommandBuffers[i]
-		};
-	}
+	VK_CHECK(vkEndCommandBuffer(cmd));
+
+	VkCommandBufferSubmitInfo cmdInfo{
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+		.commandBuffer = cmd
+	};
 
 	VkSemaphoreSubmitInfo waitInfo{
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -921,8 +940,8 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
 		.waitSemaphoreInfoCount = 1,
 		.pWaitSemaphoreInfos = &waitInfo,
-		.commandBufferInfoCount = static_cast<uint32_t>(cmdInfos.size()),
-		.pCommandBufferInfos = cmdInfos.data(),
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &cmdInfo,
 		.signalSemaphoreInfoCount = 1,
 		.pSignalSemaphoreInfos = &signalInfo
 	};
@@ -936,7 +955,7 @@ void GpuMPComputeStrategy::ConsumeAllSlots()
 {
 	const size_t C = _cageMesh._vertices.rows();
 
-	for (uint32_t slot = 0; slot < _slots.size(); ++slot)
+	for (uint32_t slot = 0; slot < _activeSlotCount; ++slot)
 	{
 		const uint32_t deformableIndex = _slotToDeformableIndex[slot];
 		if (deformableIndex == UINT32_MAX)
