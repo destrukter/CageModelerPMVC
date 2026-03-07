@@ -8,7 +8,12 @@
 #include <Mesh/PolygonMesh.h>
 #include <Mesh/ScreenPass.h>
 #include <Editor/Light.h>
+#include <Thread/ThreadPool.h>
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <future>
+#include <thread>
 
 
 CubemapManager::CubemapManager(const std::shared_ptr<RenderPipelineManager>& renderPipelineManager,
@@ -402,39 +407,154 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	CreateVertexBufferFromMesh();
 	CreateIndexBufferFromMesh();
 
-
-
-
-	CubemapRenderInstance instance(
-		*this,
-		_cubemapSize,
-		_format,
-		deformationType,
-
-		_device,
-		_descriptorPool,
-		_resourceManager,
-		_renderPipelineManager,
-
-		_cageMesh,
-		_deformableMesh,
-
-		_graphicCommandPool,
-		_renderPass,
-		_renderPassCpu,
-		_cubemapPipelineHandle,
-		_cubemapPipelineHandleCpu,
-
-		_matricesLayout,
-
-		_indexBuffer,
-		_vertexBuffer
-	);
-	CubemapWorkRange range{};
-	range.first = 0;
-	range.count = static_cast<uint32_t>(_deformableMesh._vertices.rows());
 	Eigen::MatrixXd weights;
-	instance.ComputeCoordinates(range, weights);
+	const uint32_t deformableVertexCount = static_cast<uint32_t>(_deformableMesh._vertices.rows());
+
+	const bool isAllAtOnceMode =
+		deformationType == DeformationType::PMVCAllOffset ||
+		deformationType == DeformationType::PMVCAllNoOffset;
+
+	if (isAllAtOnceMode && deformableVertexCount > 0)
+	{
+		const uint32_t hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+		const uint32_t workerCount = std::min(deformableVertexCount, hardwareThreads);
+
+		ThreadPool threadPool(workerCount);
+		std::vector<std::future<void>> futures;
+		futures.reserve(workerCount);
+
+		const Eigen::Index numRows = _deformableMesh._vertices.rows();
+		const Eigen::Index numCols = _cageMesh._vertices.rows();
+		std::vector<std::atomic<double>> atomicWeights(static_cast<size_t>(numRows * numCols));
+
+		for (auto& value : atomicWeights)
+		{
+			value.store(0.0, std::memory_order_relaxed);
+		}
+
+		auto atomicAdd = [](std::atomic<double>& target, const double value)
+			{
+				double current = target.load(std::memory_order_relaxed);
+				while (!target.compare_exchange_weak(
+					current,
+					current + value,
+					std::memory_order_relaxed,
+					std::memory_order_relaxed))
+				{
+				}
+			};
+
+		const uint32_t baseCount = deformableVertexCount / workerCount;
+		const uint32_t remainder = deformableVertexCount % workerCount;
+
+		uint32_t firstVertex = 0;
+		for (uint32_t workerIndex = 0; workerIndex < workerCount; ++workerIndex)
+		{
+			const uint32_t localCount = baseCount + (workerIndex < remainder ? 1u : 0u);
+			const uint32_t workerFirst = firstVertex;
+			firstVertex += localCount;
+
+			if (localCount == 0)
+			{
+				continue;
+			}
+
+			futures.emplace_back(threadPool.Submit([=, this, &atomicWeights, &atomicAdd]()
+				{
+					CubemapRenderInstance instance(
+						*this,
+						_cubemapSize,
+						_format,
+						deformationType,
+
+						_device,
+						_descriptorPool,
+						_resourceManager,
+						_renderPipelineManager,
+
+						_cageMesh,
+						_deformableMesh,
+
+						_graphicCommandPool,
+						_renderPass,
+						_renderPassCpu,
+						_cubemapPipelineHandle,
+						_cubemapPipelineHandleCpu,
+
+						_matricesLayout,
+
+						_indexBuffer,
+						_vertexBuffer
+					);
+
+					CubemapWorkRange range{};
+					range.first = workerFirst;
+					range.count = localCount;
+
+					Eigen::MatrixXd localWeights;
+					instance.ComputeCoordinates(range, localWeights);
+
+					for (Eigen::Index row = 0; row < localWeights.rows(); ++row)
+					{
+						const Eigen::Index globalRow = static_cast<Eigen::Index>(workerFirst) + row;
+						for (Eigen::Index col = 0; col < localWeights.cols(); ++col)
+						{
+							const size_t matrixIndex = static_cast<size_t>(globalRow * numCols + col);
+							atomicAdd(atomicWeights[matrixIndex], localWeights(row, col));
+						}
+					}
+				}));
+		}
+
+		for (auto& future : futures)
+		{
+			future.get();
+		}
+
+		weights.resize(numRows, numCols);
+		for (Eigen::Index row = 0; row < numRows; ++row)
+		{
+			for (Eigen::Index col = 0; col < numCols; ++col)
+			{
+				const size_t matrixIndex = static_cast<size_t>(row * numCols + col);
+				weights(row, col) = atomicWeights[matrixIndex].load(std::memory_order_relaxed);
+			}
+		}
+	}
+	else
+	{
+		CubemapRenderInstance instance(
+			*this,
+			_cubemapSize,
+			_format,
+			deformationType,
+
+			_device,
+			_descriptorPool,
+			_resourceManager,
+			_renderPipelineManager,
+
+			_cageMesh,
+			_deformableMesh,
+
+			_graphicCommandPool,
+			_renderPass,
+			_renderPassCpu,
+			_cubemapPipelineHandle,
+			_cubemapPipelineHandleCpu,
+
+			_matricesLayout,
+
+			_indexBuffer,
+			_vertexBuffer
+		);
+
+		CubemapWorkRange range{};
+		range.first = 0;
+		range.count = deformableVertexCount;
+		instance.ComputeCoordinates(range, weights);
+	}
+
 	Eigen::MatrixXd M = weights;
 	Eigen::MatrixXd interpolatedWeights;
 	Eigen::MatrixXd psi;
