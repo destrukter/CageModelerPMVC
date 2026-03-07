@@ -1,2 +1,4 @@
-configure_file("Configuration.h.in" "${PROJECT_SOURCE_DIR}/app/Configuration.h" ESCAPE_QUOTES)
-include_directories("${PROJECT_SOURCE_DIR}/app")
+set(MCD_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+
+configure_file("Configuration.h.in" "${MCD_GENERATED_INCLUDE_DIR}/Configuration.h" ESCAPE_QUOTES)
+include_directories("${MCD_GENERATED_INCLUDE_DIR}")

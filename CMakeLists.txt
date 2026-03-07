@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 
 project(cageDeformation3D CXX)
 
+# Keep multi-config generators (e.g., Visual Studio) aligned with the configured build type
+# from CMake presets, so `cmake --build .` does not default to Debug unexpectedly.
+get_property(BUILDING_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if (BUILDING_MULTI_CONFIG AND CMAKE_BUILD_TYPE)
+    set(CMAKE_CONFIGURATION_TYPES
+        ${CMAKE_BUILD_TYPE}
+        CACHE STRING "Enabled build types" FORCE)
+endif()
+
 # Only do these if this is the main project, and not if it is included through add_subdirectory.
 if (CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(CMAKE_CXX_STANDARD 14)
