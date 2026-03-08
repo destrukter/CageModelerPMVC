@@ -59,10 +59,12 @@ public:
 
 private: 
 	//init functions:
-	VkRenderPass CreateRenderPass(VkFormat format, bool cpuTransfer);
+	//VkRenderPass CreateRenderPass(VkFormat format, bool cpuTransfer);
+	VkRenderPass CreateRenderPass(VkFormat format, bool cpuTransfer, bool secondHitPass);
 	void CreateCommandPool(uint32_t queueFamilyIndex);
 	void CreateDescriptorSetLayouts();
-	PipelineHandle CreateCubemapRenderPipeline(bool cpuTransfer);
+	//PipelineHandle CreateCubemapRenderPipeline(bool cpuTransfer);
+	PipelineHandle CreateCubemapRenderPipeline(bool cpuTransfer, bool secondHitPass);
 	void CreateVertexBufferFromMesh();
 	void CreateIndexBufferFromMesh();
 	//void SphereWeightInitialization(uint32_t size);
@@ -92,8 +94,10 @@ private:
 	VkCommandPool _graphicCommandPool;
 	VkRenderPass _renderPass;
 	VkRenderPass _renderPassCpu;
+	VkRenderPass _renderPassSecondHit;
 	PipelineHandle _cubemapPipelineHandle;
 	PipelineHandle _cubemapPipelineHandleCpu;
+	PipelineHandle _cubemapSecondHitPipelineHandle;
 
 	//buffers
 	MemoryMappedBuffer _indexBuffer;

@@ -83,8 +83,10 @@ public:
 		VkCommandPool graphicsCommandPool,
 		VkRenderPass renderPass,
 		VkRenderPass renderPassCpu,
+		VkRenderPass renderPassSecondHit,
 		PipelineHandle cubemapPipelineHandle,
 		PipelineHandle cubemapPipelineHandleCpu,
+		PipelineHandle cubemapSecondHitPipelineHandle,
 
 		RenderResourceRef<DescriptorSetLayout> matricesLayout,
 
@@ -125,7 +127,7 @@ private:
 	void CreateSyncObjects();
 
 	void RecordAndSubmitCubemapRender(uint32_t cubemapIdx, uint32_t targetIndex, const glm::vec3& camPos,
-		CubemapRenderTarget& target, VkSemaphore timeline, uint64_t signalValue); //TODO submit cubemap at once not in 6 parts
+		CubemapRenderTarget& target, VkSemaphore timeline, uint64_t signalValue, int numPass);
 	std::vector<glm::vec3> BuildDeformableVertexPositions() const;
 
 	void ComputeCoordinatesCpu(
@@ -153,8 +155,10 @@ private:
 	VkCommandPool _graphicsCommandPool;
 	VkRenderPass _renderPass;
 	VkRenderPass _renderPassCpu;
+	VkRenderPass _renderPassSecondHit;
 	PipelineHandle _cubemapPipelineHandle;
 	PipelineHandle _cubemapPipelineHandleCpu;
+	PipelineHandle _cubemapSecondHitPipelineHandle;
 	RenderResourceRef<DescriptorSetLayout>  _matricesLayout;
 	MemoryMappedBuffer _indexBuffer;
 	MemoryMappedBuffer _vertexBuffer;

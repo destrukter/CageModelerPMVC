@@ -45,8 +45,10 @@ CubemapRenderInstance::CubemapRenderInstance(
 	VkCommandPool graphicsCommandPool,
 	VkRenderPass renderPass,
 	VkRenderPass renderPassCpu,
+	VkRenderPass renderPassSecondHit,
 	PipelineHandle cubemapPipelineHandle,
 	PipelineHandle cubemapPipelineHandleCpu,
+	PipelineHandle cubemapSecondHitPipelineHandle,
 
 	RenderResourceRef<DescriptorSetLayout> matricesLayout,
 
@@ -64,7 +66,9 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _graphicsCommandPool(graphicsCommandPool)
 , _renderPass(renderPass)
 , _renderPassCpu(renderPassCpu)
+, _renderPassSecondHit(renderPassSecondHit)
 , _cubemapPipelineHandle(cubemapPipelineHandle)
+, _cubemapSecondHitPipelineHandle(cubemapSecondHitPipelineHandle)
 , _matricesLayout(std::move(matricesLayout))
 , _indexBuffer(std::move(indexBuffer))
 , _vertexBuffer(std::move(vertexBuffer))
@@ -471,7 +475,8 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	const glm::vec3& camPos,
 	CubemapRenderTarget& target,
 	VkSemaphore timeline,
-	uint64_t signalValue)
+	uint64_t signalValue,
+	int numPass)
 {
 	assert(targetIndex < _cubemapRenderUnit.graphicsCmdPerTarget.size());
 
@@ -484,7 +489,11 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	};
 	
+	//PipelineHandle pipelineHandle = _cubemapPipelineHandle;
 	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
+	if(numPass > 1)
+		pipelineHandle = _cubemapSecondHitPipelineHandle;
+
 	if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
 		pipelineHandle = _cubemapPipelineHandleCpu;
 
@@ -527,10 +536,13 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			sizeof(push),
 			&push);
 
+		//VkRenderPass renderPass = _renderPass;
+
 		VkRenderPass renderPass = _renderPass;
+		if(numPass > 1)
+			renderPass = _renderPassSecondHit;
 		if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
 			renderPass = _renderPassCpu;
-
 		VkRenderPassBeginInfo rpInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 			.renderPass = renderPass,
@@ -755,7 +767,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 			vertices[cubemapIdx],
 			target,
 			timeline,
-			renderDone
+			renderDone,
+			1
 		);
 	}
 	LOG_DEBUG("Cubemap Renders submitted");
@@ -789,11 +802,77 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		timeline,
 		computeDone
 	);
-	LOG_DEBUG("Computes submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
+	// ============================================================
+// Phase 3: Submit ALL readback copies
+// ============================================================
+	{
+		uint64_t copyDone = ++timelineValue;
+		waitTemp = std::chrono::high_resolution_clock::now();
+		computeStage->SubmitAllReadbackCopies(
+			timeline,
+			computeDone,
+			timeline,
+			copyDone
+		);
+		LOG_DEBUG("Readback submitted");
+		waitSeconds = SecondsSince(waitTemp);
+		LOG_DEBUG(
+			"Total time={:.6f} ms",
+			waitSeconds * 1000.0);
+		// ============================================================
+		// Phase 4: Wait ONCE (everything complete)
+		// ============================================================
+		VkSemaphoreWaitInfo wait{};
+		wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		wait.semaphoreCount = 1;
+		wait.pSemaphores = &timeline;
+		wait.pValues = &copyDone;
+
+		vkWaitSemaphores(_device, &wait, UINT64_MAX);
+		//timelineValue = copyDone;
+		timelineValue = copyDone;
+		// ============================================================
+		// Phase 5: Consume ALL slots (CPU-side)
+		// ============================================================
+		computeStage->ConsumeAllSlots(1);
+	}
+
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		const uint32_t cubemapIdx = range.first + i;
+		CubemapRenderTarget& target =
+			_cubemapRenderUnit.targets[i];
+		renderDone = ++timelineValue;
+		RecordAndSubmitCubemapRender(
+			cubemapIdx,
+			i,
+			vertices[cubemapIdx],
+			target,
+			timeline,
+			renderDone,
+			2
+		);
+	}
+	// ============================================================
+	// Phase 2: Record ALL compute command buffers
+	// ============================================================
+	waitTemp = std::chrono::high_resolution_clock::now();
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		computeStage->RecordCompute(
+			i,
+			_cubemapRenderUnit.targets[i],
+			range.first + i
+		);
+	}
+	computeStage->SubmitAllComputes(
+		timeline,
+		renderDone,
+		timeline,
+		computeDone
+	);
+
+
 	// ============================================================
 	// Phase 3: Submit ALL readback copies
 	// ============================================================
@@ -825,8 +904,9 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	// ============================================================
 	// Phase 5: Consume ALL slots (CPU-side)
 	// ============================================================
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->ConsumeAllSlots();
+	computeStage->ConsumeAllSlots(2);
+
+
 	LOG_DEBUG("Slots consumed");
 	waitSeconds = SecondsSince(waitTemp);
 	LOG_DEBUG(
@@ -924,7 +1004,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 			vertices[cubemapIdx],
 			target,
 			timeline,
-			renderDone
+			renderDone,
+			1
 		);
 
 		// --------------------------------------------------------
@@ -1052,7 +1133,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 			vertices[cubemapIdx],
 			target,
 			timeline,
-			renderDone
+			renderDone,
+			1
 		);
 
 		// ------------------------------------------------------------
@@ -1153,7 +1235,8 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 			vertices[cubemapIdx],
 			target,
 			timeline,
-			renderDone
+			renderDone,
+			1
 		);
 
 		computeStage->RecordReadback(i, target, cubemapIdx);
