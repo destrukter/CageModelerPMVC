@@ -865,6 +865,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 			range.first + i
 		);
 	}
+	computeDone = ++timelineValue;
 	computeStage->SubmitAllComputes(
 		timeline,
 		renderDone,

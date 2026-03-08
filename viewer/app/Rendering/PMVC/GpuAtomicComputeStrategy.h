@@ -57,8 +57,7 @@ public:
         uint32_t deformableIndex,
         uint32_t slot,
         VkSemaphore timeline,
-        uint32_t waitValue,
-        int numPass);
+        uint32_t waitValue);
 
     void SubmitReadbackCopy(
         uint32_t slot,
