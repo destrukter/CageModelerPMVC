@@ -359,7 +359,7 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
 
     for (size_t c = 0; c < lambda.size(); ++c)
     {
-        _lambdaResults(deformableIndex, static_cast<Eigen::Index>(c)) = lambda[c];
+        _lambdaResults(deformableIndex, static_cast<Eigen::Index>(c)) += lambda[c];
     }
-    _wsumResults[deformableIndex] = wsum;
+    _wsumResults[deformableIndex] += wsum;
 }

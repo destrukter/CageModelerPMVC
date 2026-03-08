@@ -361,9 +361,9 @@ void GpuSerialComputeStrategy::ConsumeSlot(
 		*(float*)_slots[slot].wsumStaging._mappedData;
 
 	for (size_t c = 0; c < C; ++c)
-		_lambdaResults[deformableIndex][c] = lambda[c];
+		_lambdaResults[deformableIndex][c] += lambda[c];
 
-	_wsumResults[deformableIndex] = wsum;
+	_wsumResults[deformableIndex] += wsum;
 }
 Eigen::MatrixXd toEigenMatrix(const std::vector<std::vector<float>>& v)
 {
@@ -484,7 +484,7 @@ void GpuSerialComputeStrategy::CreateSampler() {
 	samplerInfo.maxLod = 0.0f;
 	samplerInfo.mipLodBias = 0.0f;
 
-	// Clamp (doesn’t really matter since texelFetch ignores addressing)
+	// Clamp (doesnt really matter since texelFetch ignores addressing)
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
