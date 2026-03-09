@@ -955,14 +955,14 @@ void GpuMPComputeStrategy::ConsumeAllSlots(uint64_t numPass)
 			*(float*)_slots[slot].wsumStaging._mappedData;
 
 		for (size_t c = 0; c < C; ++c) {
-			if (numPass == 1)
+			if (numPass % 2 == 1)
 				_lambdaResults(deformableIndex, c) += lambda[c];
-			else if (numPass > 1)
+			else if (numPass % 2 == 0)
 				_lambdaResults(deformableIndex, c) -= lambda[c];
 		}
-		if (numPass == 1)
+		if (numPass % 2 == 1)
 			_wsumResults[deformableIndex] += wsum;
-		else if (numPass > 1)
+		else if (numPass % 2 == 0)
 			_wsumResults[deformableIndex] -= wsum;
 	}
 }

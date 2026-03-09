@@ -101,7 +101,9 @@ public:
 	void ComputeCoordinatesGPUAtomic(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 	void ComputeCoordinatesGPUMP(
 		const CubemapWorkRange& range,
-		Eigen::MatrixXd& weights);
+		Eigen::MatrixXd& weights,
+		uint64_t hitCount,
+		bool omitNegatives);
 	void ComputeCoordinates(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 
 private:

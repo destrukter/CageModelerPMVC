@@ -703,7 +703,9 @@ uint32_t CubemapRenderInstance::FindMemoryType(uint32_t typeFilter, VkMemoryProp
 
 void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const CubemapWorkRange& range,
-	Eigen::MatrixXd& weights)
+	Eigen::MatrixXd& weights,
+	uint64_t hitCount,
+	bool omitNegatives)
 {
 	auto waitStart = std::chrono::high_resolution_clock::now();
 	auto waitTemp = std::chrono::high_resolution_clock::now();
@@ -724,207 +726,111 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	VkSemaphore timeline = _timelines[0];
 	uint64_t& timelineValue = _slotDoneValue[0];
 
-	if (timelineValue > 0)
-	{
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
-		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
-	}
-
-	if (timelineValue > 0)
-	{
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
-		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
-	}
-	// ============================================================
+	for (int hit = 1; hit <= hitCount; hit++) {
+		// ============================================================
 	// Phase 1: Render ALL cubemaps
 	// ============================================================
-	uint64_t renderDone = timelineValue;
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		}
+		uint64_t renderDone = timelineValue;
 
-	double waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG("Init complete");
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
+		double waitSeconds = SecondsSince(waitTemp);
+		LOG_DEBUG("Init complete");
+		LOG_DEBUG(
+			"Total time={:.6f} ms",
+			waitSeconds * 1000.0);
 
-	waitTemp = std::chrono::high_resolution_clock::now();
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		const uint32_t cubemapIdx = range.first + i;
-		CubemapRenderTarget& target =
-			_cubemapRenderUnit.targets[i];
-		renderDone = ++timelineValue;
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			i,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone,
-			1
-		);
-	}
-	LOG_DEBUG("Cubemap Renders submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	// ============================================================
-	// Phase 2: Record ALL compute command buffers
-	// ============================================================
-	waitTemp = std::chrono::high_resolution_clock::now();
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		computeStage->RecordCompute(
-			i,
-			_cubemapRenderUnit.targets[i],
-			range.first + i
-		);
-	}
-	LOG_DEBUG("Cubemap Renders recorded");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-
-	uint64_t computeDone = ++timelineValue;
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->SubmitAllComputes(
-		timeline,
-		renderDone,
-		timeline,
-		computeDone
-	);
-	// ============================================================
-// Phase 3: Submit ALL readback copies
-// ============================================================
-	{
-		uint64_t copyDone = ++timelineValue;
 		waitTemp = std::chrono::high_resolution_clock::now();
-		computeStage->SubmitAllReadbackCopies(
-			timeline,
-			computeDone,
-			timeline,
-			copyDone
-		);
-		LOG_DEBUG("Readback submitted");
+		for (uint32_t i = 0; i < cubemapCount; ++i)
+		{
+			const uint32_t cubemapIdx = range.first + i;
+			CubemapRenderTarget& target =
+				_cubemapRenderUnit.targets[i];
+			renderDone = ++timelineValue;
+			RecordAndSubmitCubemapRender(
+				cubemapIdx,
+				i,
+				vertices[cubemapIdx],
+				target,
+				timeline,
+				renderDone,
+				hit
+			);
+		}
+		LOG_DEBUG("Cubemap Renders submitted");
 		waitSeconds = SecondsSince(waitTemp);
 		LOG_DEBUG(
 			"Total time={:.6f} ms",
 			waitSeconds * 1000.0);
 		// ============================================================
-		// Phase 4: Wait ONCE (everything complete)
+		// Phase 2: Record ALL compute command buffers
 		// ============================================================
-		VkSemaphoreWaitInfo wait{};
-		wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		wait.semaphoreCount = 1;
-		wait.pSemaphores = &timeline;
-		wait.pValues = &copyDone;
+		waitTemp = std::chrono::high_resolution_clock::now();
+		for (uint32_t i = 0; i < cubemapCount; ++i)
+		{
+			computeStage->RecordCompute(
+				i,
+				_cubemapRenderUnit.targets[i],
+				range.first + i
+			);
+		}
+		LOG_DEBUG("Cubemap Renders recorded");
+		waitSeconds = SecondsSince(waitTemp);
+		LOG_DEBUG(
+			"Total time={:.6f} ms",
+			waitSeconds * 1000.0);
 
-		vkWaitSemaphores(_device, &wait, UINT64_MAX);
-		//timelineValue = copyDone;
-		timelineValue = copyDone;
-		// ============================================================
-		// Phase 5: Consume ALL slots (CPU-side)
-		// ============================================================
-		computeStage->ConsumeAllSlots(1);
-	}
-
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		const uint32_t cubemapIdx = range.first + i;
-		CubemapRenderTarget& target =
-			_cubemapRenderUnit.targets[i];
-		renderDone = ++timelineValue;
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			i,
-			vertices[cubemapIdx],
-			target,
+		uint64_t computeDone = ++timelineValue;
+		waitTemp = std::chrono::high_resolution_clock::now();
+		computeStage->SubmitAllComputes(
 			timeline,
 			renderDone,
-			2
+			timeline,
+			computeDone
 		);
-	}
-	// ============================================================
-	// Phase 2: Record ALL compute command buffers
-	// ============================================================
-	waitTemp = std::chrono::high_resolution_clock::now();
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		computeStage->RecordCompute(
-			i,
-			_cubemapRenderUnit.targets[i],
-			range.first + i
-		);
-	}
-	computeDone = ++timelineValue;
-	computeStage->SubmitAllComputes(
-		timeline,
-		renderDone,
-		timeline,
-		computeDone
-	);
-
-
-	// ============================================================
+		// ============================================================
 	// Phase 3: Submit ALL readback copies
 	// ============================================================
-	uint64_t copyDone = ++timelineValue;
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->SubmitAllReadbackCopies(
-		timeline,
-		computeDone,
-		timeline,
-		copyDone
-	);
-	LOG_DEBUG("Readback submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	// ============================================================
-	// Phase 4: Wait ONCE (everything complete)
-	// ============================================================
-	VkSemaphoreWaitInfo wait{};
-	wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-	wait.semaphoreCount = 1;
-	wait.pSemaphores = &timeline;
-	wait.pValues = &copyDone;
+			uint64_t copyDone = ++timelineValue;
+			waitTemp = std::chrono::high_resolution_clock::now();
+			computeStage->SubmitAllReadbackCopies(
+				timeline,
+				computeDone,
+				timeline,
+				copyDone
+			);
+			LOG_DEBUG("Readback submitted");
+			waitSeconds = SecondsSince(waitTemp);
+			LOG_DEBUG(
+				"Total time={:.6f} ms",
+				waitSeconds * 1000.0);
+			// ============================================================
+			// Phase 4: Wait ONCE (everything complete)
+			// ============================================================
+			VkSemaphoreWaitInfo wait{};
+			wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			wait.semaphoreCount = 1;
+			wait.pSemaphores = &timeline;
+			wait.pValues = &copyDone;
 
-	vkWaitSemaphores(_device, &wait, UINT64_MAX);
-	//timelineValue = copyDone;
-	timelineValue = copyDone;
-	// ============================================================
-	// Phase 5: Consume ALL slots (CPU-side)
-	// ============================================================
-	computeStage->ConsumeAllSlots(2);
-
-
-	LOG_DEBUG("Slots consumed");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	waitTemp = std::chrono::high_resolution_clock::now();
+			vkWaitSemaphores(_device, &wait, UINT64_MAX);
+			//timelineValue = copyDone;
+			timelineValue = copyDone;
+			// ============================================================
+			// Phase 5: Consume ALL slots (CPU-side)
+			// ============================================================
+			//if(hit % 2 == 1 || !omitNegatives)
+			if(hit == 3)
+				computeStage->ConsumeAllSlots(hit);
+	}
 	weights = computeStage->Readback();
-	LOG_DEBUG("Readback complete");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched): done");
-	waitSeconds = SecondsSince(waitStart);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
 }
 
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
@@ -1272,7 +1178,7 @@ void CubemapRenderInstance::ComputeCoordinates(
 		ComputeCoordinatesGPUAtomic(range, weights);
 	}
 	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
-		ComputeCoordinatesGPUMP(range, weights);
+		ComputeCoordinatesGPUMP(range, weights, 3, true);
 	}
 	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
 		ComputeCoordinatesCpu(range, weights);
