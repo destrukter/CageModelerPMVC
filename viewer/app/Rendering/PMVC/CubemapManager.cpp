@@ -35,9 +35,10 @@ void CubemapManager::Initialize()
 	//SphereWeightInitialization(512);
 }
 
-VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer, bool secondHitPass) {
+VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer, bool secondHitPass)
+{
 	VkRenderPass renderPass;
-	
+
 	VkAttachmentDescription colorAttachment{};
 	colorAttachment.format = format;
 	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -46,27 +47,25 @@ VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer,
 	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	if(!cpuTransfer)
-		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	else
-		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	colorAttachment.finalLayout = cpuTransfer
+		? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+		: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = _device->FindDepthFormat();
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	//depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.loadOp = secondHitPass ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+	// Always clear: renderDepth is reused as a fresh writable depth target
+	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	//depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.initialLayout = secondHitPass
-		? (cpuTransfer ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL)
-		: VK_IMAGE_LAYOUT_UNDEFINED;
-	if (!cpuTransfer)
-		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	else
-		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+	// We no longer carry previous peeled depth in the attachment itself
+	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthAttachment.finalLayout = cpuTransfer
+		? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+		: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference colorAttachmentRef{};
 	colorAttachmentRef.attachment = 0;
@@ -82,60 +81,67 @@ VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer,
 	subpass.pColorAttachments = &colorAttachmentRef;
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-	/*VkSubpassDependency dependency{};
+	// Basic attachment dependency only.
+	// Sampling prevDepth must be synchronized with explicit image barriers.
+	VkSubpassDependency dependency{};
 	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
 	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;*/
-	std::array<VkSubpassDependency, 2> dependencies{};
-	if (secondHitPass)
-	{
-		dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-		dependencies[0].dstSubpass = 0;
-		dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-		dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-		dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependency.srcStageMask =
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	dependency.srcAccessMask =
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependency.dstStageMask =
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependency.dstAccessMask =
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-		dependencies[1].srcSubpass = 0;
-		dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-		dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-		dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-		dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	}
-	else
-	{
-		dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-		dependencies[0].dstSubpass = 0;
-		dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-		dependencies[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-		dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	}
+	std::array<VkAttachmentDescription, 2> attachments = {
+		colorAttachment,
+		depthAttachment
+	};
 
-
-	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
 	renderPassInfo.pAttachments = attachments.data();
 	renderPassInfo.subpassCount = 1;
 	renderPassInfo.pSubpasses = &subpass;
-	//renderPassInfo.dependencyCount = 1;
-	//renderPassInfo.pDependencies = &dependency;
-	renderPassInfo.dependencyCount = secondHitPass ? 2u : 1u;
-	renderPassInfo.pDependencies = dependencies.data();
+	renderPassInfo.dependencyCount = 1;
+	renderPassInfo.pDependencies = &dependency;
 
-	if (vkCreateRenderPass(_device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+	if (vkCreateRenderPass(_device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
+	{
 		throw std::runtime_error("failed to create Cubemap render pass!");
 	}
+
 	return renderPass;
 }
 
-void CubemapManager::CreateDescriptorSetLayouts() {
+void CubemapManager::CreateDescriptorSetLayouts()
+{
+	VkDescriptorSetLayoutBinding matricesBinding{};
+	matricesBinding.binding = 0;
+	matricesBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	matricesBinding.descriptorCount = 1;
+	matricesBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	std::array<VkDescriptorSetLayoutBinding, 1> matricesBindings{ matricesBinding };
+	_matricesLayout = _descriptorPool->CreateDescriptorSetLayout(matricesBindings);
+
+	VkDescriptorSetLayoutBinding prevDepthBinding{};
+	prevDepthBinding.binding = 0;
+	prevDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	prevDepthBinding.descriptorCount = 1;
+	prevDepthBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	std::array<VkDescriptorSetLayoutBinding, 1> prevDepthBindings{ prevDepthBinding };
+	_prevDepthLayout = _descriptorPool->CreateDescriptorSetLayout(prevDepthBindings);
+}
+/*void CubemapManager::CreateDescriptorSetLayouts() {
 	VkDescriptorSetLayoutBinding layoutBinding{ };
 	layoutBinding.binding = 0;
 	layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -145,7 +151,7 @@ void CubemapManager::CreateDescriptorSetLayouts() {
 	std::array<VkDescriptorSetLayoutBinding, 1> layoutBindings{ layoutBinding };
 
 	_matricesLayout = _descriptorPool->CreateDescriptorSetLayout(layoutBindings);
-}
+}*/
 
 PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, bool secondHitPass)
 {
@@ -202,7 +208,12 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, boo
 	msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
 	// Only the matrices layout is needed for cubemap rendering
-	std::array descriptorSetLayouts{ _matricesLayout->GetReference() };
+	//std::array descriptorSetLayouts{ _matricesLayout->GetReference() };
+	std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+	descriptorSetLayouts.push_back(_matricesLayout->GetReference());
+
+	if (secondHitPass)
+		descriptorSetLayouts.push_back(_prevDepthLayout->GetReference());
 
 	VkViewport viewport{};
 	viewport.x = 0.0f;
@@ -222,21 +233,24 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, boo
 	pushConstantRange.size = sizeof(CubemapPushConstants);
 
 	VkRenderPass renderPass;
-	if(!cpuTransfer)
-		renderPass = _renderPass;
-	else
+	if (cpuTransfer)
 		renderPass = _renderPassCpu;
+	else if (secondHitPass)
+		renderPass = _renderPassSecondHit;
+	else
+		renderPass = _renderPass;
 
 	// Build the pipeline
 	return _renderPipelineManager->BeginPipeline()
 		.SetRenderPass(renderPass)
 		.SetColorBlendAttachments(std::span(&colorBlendAttachment, 1))
 		.SetDepthStencilState(depthStencil)
-		.SetDescriptorSetLayouts(std::span(descriptorSetLayouts))
+		.SetDescriptorSetLayouts(std::span(descriptorSetLayouts.data(), descriptorSetLayouts.size()))
 		.SetSubpassIndex(0)
 		.SetShaderModule(ShaderModuleType::Vertex, "assets/shaders/Cubemap.vert.spv")
-		//.SetShaderModule(ShaderModuleType::Fragment, "assets/shaders/Cubemap.frag.spv")
-		.SetShaderModule(ShaderModuleType::Fragment, secondHitPass ? "assets/shaders/CubemapSecondHit.frag.spv" : "assets/shaders/Cubemap.frag.spv")
+		.SetShaderModule(ShaderModuleType::Fragment,
+			secondHitPass ? "assets/shaders/CubemapSecondHit.frag.spv"
+			: "assets/shaders/Cubemap.frag.spv")
 		.AddPushConstantRange(pushConstantRange)
 		.SetMultisampleState(msaa)
 		.SetViewportAndScissor(viewport, scissor)

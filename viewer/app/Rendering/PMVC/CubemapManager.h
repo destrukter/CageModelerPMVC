@@ -106,6 +106,7 @@ private:
 	//descriptors
 	RenderResourceRef < DescriptorPool> _descriptorPool;
 	RenderResourceRef < DescriptorSetLayout> _matricesLayout;
+	RenderResourceRef<DescriptorSetLayout> _prevDepthLayout;
 
 	//friend class CubemapRenderInstance; //TODO remove and fix dependencies!
 	//friend class GpuSerialComputeStrategy;

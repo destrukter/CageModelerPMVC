@@ -159,7 +159,6 @@ void CubemapRenderInstance::Initialize() {
 CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 {
 	CubemapRenderTarget target{};
-	//target.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	// ---------------------------------------------------------------------
 	// Create cubemap color image
@@ -177,7 +176,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 		VK_IMAGE_USAGE_SAMPLED_BIT |
 		VK_IMAGE_USAGE_STORAGE_BIT |
-		VK_IMAGE_USAGE_TRANSFER_SRC_BIT; //TODO: only added for debugging prints for image remove after done(needed for CPU compute?)
+		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VK_CHECK(vkCreateImage(_device, &imageInfo, nullptr, &target.cubemapImage));
@@ -192,24 +191,6 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.cubemapMemory));
 	VK_CHECK(vkBindImageMemory(_device, target.cubemapImage, target.cubemapMemory, 0));
 
-
-	/*VkCommandBufferAllocateInfo allocInfoCB{
-	.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-	.commandPool = _graphicCommandPool, // or graphics pool
-	.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-	.commandBufferCount = 1
-	};
-
-	VkCommandBuffer cmd;
-	VK_CHECK(vkAllocateCommandBuffers(_device, &allocInfoCB, &cmd));
-
-	VkCommandBufferBeginInfo beginInfo{
-	.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-	.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-	};
-
-	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-	*/
 	// ---------------------------------------------------------------------
 	// Create per-face color views
 	// ---------------------------------------------------------------------
@@ -220,6 +201,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		viewInfo.format = _format;
 		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = face;
 		viewInfo.subresourceRange.layerCount = 1;
@@ -228,17 +210,8 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	}
 
 	// ---------------------------------------------------------------------
-	// Create cubemap view (for sampling)
+	// Create cubemap array view (for sampling / storage)
 	// ---------------------------------------------------------------------
-	/*VkImageViewCreateInfo cubeViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-	cubeViewInfo.image = target.cubemapImage;
-	cubeViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-	cubeViewInfo.format = _format;
-	cubeViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	cubeViewInfo.subresourceRange.levelCount = 1;
-	cubeViewInfo.subresourceRange.layerCount = 6;
-
-	VK_CHECK(vkCreateImageView(_cubemapManager._device, &cubeViewInfo, nullptr, &target.cubemapView));*/
 	VkImageViewCreateInfo cubeViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 	cubeViewInfo.image = target.cubemapImage;
 	cubeViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
@@ -252,78 +225,97 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	VK_CHECK(vkCreateImageView(_device, &cubeViewInfo, nullptr, &target.cubemapView));
 
 	// ---------------------------------------------------------------------
-	// Create depth image
+	// Create depth images:
+	//   renderDepth = writable depth attachment
+	//   prevDepth   = copied previous pass depth, sampled in shader
 	// ---------------------------------------------------------------------
-	VkFormat depthFormat = _device->FindDepthFormat();
+	const VkFormat depthFormat = _device->FindDepthFormat();
 
-	VkImageCreateInfo depthInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-	depthInfo.imageType = VK_IMAGE_TYPE_2D;
-	depthInfo.format = depthFormat;
-	depthInfo.extent = { _cubemapSize, _cubemapSize, 1 };
-	depthInfo.mipLevels = 1;
-	depthInfo.arrayLayers = 6;
-	depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-		VK_IMAGE_USAGE_SAMPLED_BIT |
-		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImage));
-
-	vkGetImageMemoryRequirements(_device, target.depthImage, &memReq);
-
-	allocInfo.allocationSize = memReq.size;
-	allocInfo.memoryTypeIndex =
-		FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-	VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.depthMemory));
-	VK_CHECK(vkBindImageMemory(_device, target.depthImage, target.depthMemory, 0));
-
-	// ---------------------------------------------------------------------
-	// Create per-face depth views
-	// ---------------------------------------------------------------------
-	for (uint32_t face = 0; face < 6; ++face)
+	auto CreateDepthLayer = [&](CubemapDepthLayer& layer)
 	{
-		VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		viewInfo.image = target.depthImage;
-		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		viewInfo.format = depthFormat;
-		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		viewInfo.subresourceRange.levelCount = 1;
-		viewInfo.subresourceRange.baseArrayLayer = face;
-		viewInfo.subresourceRange.layerCount = 1;
+		VkImageCreateInfo depthInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		depthInfo.flags = 0;
+		depthInfo.imageType = VK_IMAGE_TYPE_2D;
+		depthInfo.format = depthFormat;
+		depthInfo.extent = { _cubemapSize, _cubemapSize, 1 };
+		depthInfo.mipLevels = 1;
+		depthInfo.arrayLayers = 6;
+		depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		depthInfo.usage =
+			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+			VK_IMAGE_USAGE_SAMPLED_BIT |
+			VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+			VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-		VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[face]));
-	}
+		VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &layer.image));
 
-	VkImageViewCreateInfo depthViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-	depthViewInfo.image = target.depthImage;
-	depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	depthViewInfo.format = depthFormat;
-	depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	depthViewInfo.subresourceRange.baseMipLevel = 0;
-	depthViewInfo.subresourceRange.levelCount = 1;
-	depthViewInfo.subresourceRange.baseArrayLayer = 0;
-	depthViewInfo.subresourceRange.layerCount = 6;
+		VkMemoryRequirements depthMemReq{};
+		vkGetImageMemoryRequirements(_device, layer.image, &depthMemReq);
 
-	VK_CHECK(vkCreateImageView(_device, &depthViewInfo, nullptr, &target.depthView));
+		VkMemoryAllocateInfo depthAllocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+		depthAllocInfo.allocationSize = depthMemReq.size;
+		depthAllocInfo.memoryTypeIndex =
+			FindMemoryType(depthMemReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+		VK_CHECK(vkAllocateMemory(_device, &depthAllocInfo, nullptr, &layer.memory));
+		VK_CHECK(vkBindImageMemory(_device, layer.image, layer.memory, 0));
+
+		// Per-face views
+		for (uint32_t face = 0; face < 6; ++face)
+		{
+			VkImageViewCreateInfo faceViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+			faceViewInfo.image = layer.image;
+			faceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			faceViewInfo.format = depthFormat;
+			faceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			faceViewInfo.subresourceRange.baseMipLevel = 0;
+			faceViewInfo.subresourceRange.levelCount = 1;
+			faceViewInfo.subresourceRange.baseArrayLayer = face;
+			faceViewInfo.subresourceRange.layerCount = 1;
+
+			VK_CHECK(vkCreateImageView(_device, &faceViewInfo, nullptr, &layer.faceViews[face]));
+		}
+
+		// Array view
+		VkImageViewCreateInfo arrayViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		arrayViewInfo.image = layer.image;
+		arrayViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		arrayViewInfo.format = depthFormat;
+		arrayViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		arrayViewInfo.subresourceRange.baseMipLevel = 0;
+		arrayViewInfo.subresourceRange.levelCount = 1;
+		arrayViewInfo.subresourceRange.baseArrayLayer = 0;
+		arrayViewInfo.subresourceRange.layerCount = 6;
+
+		VK_CHECK(vkCreateImageView(_device, &arrayViewInfo, nullptr, &layer.view));
+	};
+
+	CreateDepthLayer(target.renderDepth);
+	CreateDepthLayer(target.prevDepth);
 
 	// ---------------------------------------------------------------------
-	// Create framebuffers
+	// Create framebuffers using renderDepth as the writable depth attachment
 	// ---------------------------------------------------------------------
 	for (uint32_t face = 0; face < 6; ++face)
 	{
 		VkImageView attachments[2] = {
 			target.faceViews[face],
-			target.depthViews[face]
+			target.renderDepth.faceViews[face]
 		};
 
 		VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-		if(_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType ==  DeformationType::PMVCCpuOffset)
+		if (_deformationType == DeformationType::PMVCCpuNoOffset ||
+			_deformationType == DeformationType::PMVCCpuOffset)
+		{
 			fbInfo.renderPass = _renderPassCpu;
+		}
 		else
+		{
 			fbInfo.renderPass = _renderPass;
+		}
+
 		fbInfo.attachmentCount = 2;
 		fbInfo.pAttachments = attachments;
 		fbInfo.width = _cubemapSize;
@@ -372,6 +364,23 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 		&allocInfo,
 		&unit.matricesDescriptorSet
 	));
+
+	_cubemapRenderUnit.prevDepthDescriptorSets.resize(_cubemapRenderUnit.targets.size());
+
+	std::vector<VkDescriptorSetLayout> layouts(
+		_cubemapRenderUnit.targets.size(),
+		_prevDepthLayout->GetReference());
+
+	VkDescriptorSetAllocateInfo allocInfo2{};
+	allocInfo2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocInfo2.descriptorPool = _descriptorPool;
+	allocInfo2.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+	allocInfo2.pSetLayouts = layouts.data();
+
+	VK_CHECK(vkAllocateDescriptorSets(
+		_device,
+		&allocInfo2,
+		_cubemapRenderUnit.prevDepthDescriptorSets.data()));
 
 	// ------------------------------------------------------------
 	// Allocate command buffers (one per face)
@@ -439,6 +448,27 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 	return unit;
 }
 
+void CubemapRenderInstance::UpdatePrevDepthDescriptorSet(
+	uint32_t targetIndex,
+	const CubemapRenderTarget& target)
+{
+	VkDescriptorImageInfo imageInfo{};
+	imageInfo.sampler = _depthSampler; // or whichever sampler you created for render peeling
+	imageInfo.imageView = target.prevDepth.view;
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkWriteDescriptorSet write{};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = _cubemapRenderUnit.prevDepthDescriptorSets[targetIndex];
+	write.dstBinding = 0;
+	write.dstArrayElement = 0;
+	write.descriptorCount = 1;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	write.pImageInfo = &imageInfo;
+
+	vkUpdateDescriptorSets(_device, 1, &write, 0, nullptr);
+}
+
 void CubemapRenderInstance::CreateCommandPool(uint32_t queueFamilyIndex) {
 	VkCommandPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -488,22 +518,20 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
 	};
-	
-	//PipelineHandle pipelineHandle = _cubemapPipelineHandle;
+
 	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
-	if(numPass > 1)
+	if (numPass > 1)
 		pipelineHandle = _cubemapSecondHitPipelineHandle;
 
-	if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+	if (_deformationType == DeformationType::PMVCCpuNoOffset ||
+		_deformationType == DeformationType::PMVCCpuOffset)
+	{
 		pipelineHandle = _cubemapPipelineHandleCpu;
+	}
 
 	const PipelineObject& pipelineObj =
-		_renderPipelineManager->GetPipelineObject(
-			pipelineHandle);
+		_renderPipelineManager->GetPipelineObject(pipelineHandle);
 
-	// ---------------------------------------------------------------------
-	// Update shared UBO (outside render loop)
-	// ---------------------------------------------------------------------
 	const uint32_t numTriangles =
 		static_cast<uint32_t>(_cageMesh._faces.size() / 3);
 
@@ -514,9 +542,12 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		&ubo,
 		sizeof(ubo));
 
-	// =====================================================================
-	// GRAPHICS CMDS — one per face
-	// =====================================================================
+	// For peeled passes, bind sampled previous depth
+	if (numPass > 1)
+	{
+		UpdatePrevDepthDescriptorSet(targetIndex, target);
+	}
+
 	for (uint32_t face = 0; face < 6; ++face)
 	{
 		VkCommandBuffer cmd = _cubemapRenderUnit.graphicsCmdPerTarget[targetIndex][face];
@@ -536,13 +567,13 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			sizeof(push),
 			&push);
 
-		//VkRenderPass renderPass = _renderPass;
-
 		VkRenderPass renderPass = _renderPass;
-		if(numPass > 1)
+		if (numPass > 1)
 			renderPass = _renderPassSecondHit;
-		if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+		if (_deformationType == DeformationType::PMVCCpuNoOffset ||
+			_deformationType == DeformationType::PMVCCpuOffset)
 			renderPass = _renderPassCpu;
+
 		VkRenderPassBeginInfo rpInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 			.renderPass = renderPass,
@@ -564,6 +595,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			0,
 			VK_INDEX_TYPE_UINT32);
 
+		// set 0 = matrices
 		vkCmdBindDescriptorSets(
 			cmd,
 			VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -571,6 +603,18 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			0, 1,
 			&_cubemapRenderUnit.matricesDescriptorSet,
 			0, nullptr);
+
+		// set 1 = prev depth for passes > 1
+		if (numPass > 1)
+		{
+			vkCmdBindDescriptorSets(
+				cmd,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				pipelineObj._pipelineLayout,
+				1, 1,
+				&_cubemapRenderUnit.prevDepthDescriptorSets[targetIndex],
+				0, nullptr);
+		}
 
 		vkCmdDrawIndexed(
 			cmd,
@@ -581,12 +625,9 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		VK_CHECK(vkEndCommandBuffer(cmd));
 	}
 
-	// =====================================================================
-	// SUBMIT
-	// =====================================================================
 	std::array<VkCommandBufferSubmitInfo, 6> cmdInfos{};
-
-	for (uint32_t i = 0; i < 6; ++i) {
+	for (uint32_t i = 0; i < 6; ++i)
+	{
 		cmdInfos[i] = {
 			VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
 			nullptr,
@@ -726,10 +767,11 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	VkSemaphore timeline = _timelines[0];
 	uint64_t& timelineValue = _slotDoneValue[0];
 
-	for (int hit = 1; hit <= hitCount; hit++) {
+	for (int hit = 1; hit <= hitCount; hit++)
+	{
 		// ============================================================
-	// Phase 1: Render ALL cubemaps
-	// ============================================================
+		// Phase 1: Render ALL cubemaps
+		// ============================================================
 		if (timelineValue > 0)
 		{
 			VkSemaphoreWaitInfo waitInfo{};
@@ -739,20 +781,19 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 			waitInfo.pValues = &timelineValue;
 			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
 		}
+
 		uint64_t renderDone = timelineValue;
 
 		double waitSeconds = SecondsSince(waitTemp);
 		LOG_DEBUG("Init complete");
-		LOG_DEBUG(
-			"Total time={:.6f} ms",
-			waitSeconds * 1000.0);
+		LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
 
 		waitTemp = std::chrono::high_resolution_clock::now();
 		for (uint32_t i = 0; i < cubemapCount; ++i)
 		{
 			const uint32_t cubemapIdx = range.first + i;
-			CubemapRenderTarget& target =
-				_cubemapRenderUnit.targets[i];
+			CubemapRenderTarget& target = _cubemapRenderUnit.targets[i];
+
 			renderDone = ++timelineValue;
 			RecordAndSubmitCubemapRender(
 				cubemapIdx,
@@ -764,11 +805,33 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 				hit
 			);
 		}
-		LOG_DEBUG("Cubemap Renders submitted");
+
+		LOG_DEBUG("Cubemap renders submitted");
 		waitSeconds = SecondsSince(waitTemp);
-		LOG_DEBUG(
-			"Total time={:.6f} ms",
-			waitSeconds * 1000.0);
+		LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
+
+		// ============================================================
+		// Phase 1.5: Copy renderDepth -> prevDepth for next sampling
+		// ============================================================
+		uint64_t depthCopyDone = renderDone;
+		if (hit < hitCount) // only needed if another peeled pass will follow
+		{
+			depthCopyDone = ++timelineValue;
+			waitTemp = std::chrono::high_resolution_clock::now();
+
+			RecordAndSubmitDepthCopyTransitions(
+				cubemapCount,
+				timeline,
+				renderDone,
+				timeline,
+				depthCopyDone
+			);
+
+			LOG_DEBUG("Depth copy/transition submitted");
+			waitSeconds = SecondsSince(waitTemp);
+			LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
+		}
+
 		// ============================================================
 		// Phase 2: Record ALL compute command buffers
 		// ============================================================
@@ -781,56 +844,284 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 				range.first + i
 			);
 		}
-		LOG_DEBUG("Cubemap Renders recorded");
+		LOG_DEBUG("Computes recorded");
 		waitSeconds = SecondsSince(waitTemp);
-		LOG_DEBUG(
-			"Total time={:.6f} ms",
-			waitSeconds * 1000.0);
+		LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
 
 		uint64_t computeDone = ++timelineValue;
 		waitTemp = std::chrono::high_resolution_clock::now();
 		computeStage->SubmitAllComputes(
 			timeline,
-			renderDone,
+			depthCopyDone,   // wait on depth copy/transition, not raw render
 			timeline,
 			computeDone
 		);
-		// ============================================================
-	// Phase 3: Submit ALL readback copies
-	// ============================================================
-			uint64_t copyDone = ++timelineValue;
-			waitTemp = std::chrono::high_resolution_clock::now();
-			computeStage->SubmitAllReadbackCopies(
-				timeline,
-				computeDone,
-				timeline,
-				copyDone
-			);
-			LOG_DEBUG("Readback submitted");
-			waitSeconds = SecondsSince(waitTemp);
-			LOG_DEBUG(
-				"Total time={:.6f} ms",
-				waitSeconds * 1000.0);
-			// ============================================================
-			// Phase 4: Wait ONCE (everything complete)
-			// ============================================================
-			VkSemaphoreWaitInfo wait{};
-			wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-			wait.semaphoreCount = 1;
-			wait.pSemaphores = &timeline;
-			wait.pValues = &copyDone;
 
-			vkWaitSemaphores(_device, &wait, UINT64_MAX);
-			//timelineValue = copyDone;
-			timelineValue = copyDone;
-			// ============================================================
-			// Phase 5: Consume ALL slots (CPU-side)
-			// ============================================================
-			//if(hit % 2 == 1 || !omitNegatives)
-			if(hit == 3)
-				computeStage->ConsumeAllSlots(hit);
+		// ============================================================
+		// Phase 3: Submit ALL readback copies
+		// ============================================================
+		uint64_t copyDone = ++timelineValue;
+		waitTemp = std::chrono::high_resolution_clock::now();
+		computeStage->SubmitAllReadbackCopies(
+			timeline,
+			computeDone,
+			timeline,
+			copyDone
+		);
+
+		LOG_DEBUG("Readback submitted");
+		waitSeconds = SecondsSince(waitTemp);
+		LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
+
+		// ============================================================
+		// Phase 4: Wait ONCE
+		// ============================================================
+		VkSemaphoreWaitInfo wait{};
+		wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		wait.semaphoreCount = 1;
+		wait.pSemaphores = &timeline;
+		wait.pValues = &copyDone;
+
+		vkWaitSemaphores(_device, &wait, UINT64_MAX);
+		timelineValue = copyDone;
+
+		// ============================================================
+		// Phase 5: Consume CPU-side
+		// ============================================================
+		if (hit == 3)
+			computeStage->ConsumeAllSlots(hit);
 	}
+
 	weights = computeStage->Readback();
+}
+
+void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
+	uint32_t cubemapCount,
+	VkSemaphore waitSemaphore,
+	uint64_t waitValue,
+	VkSemaphore signalSemaphore,
+	uint64_t signalValue)
+{
+	VkQueue graphicsQueue;
+	vkGetDeviceQueue(
+		_device,
+		_device->GetQueueFamilies()._graphics.value(),
+		0,
+		&graphicsQueue);
+
+	ScopedCmdBuffer scoped(_device, _graphicCommandPool);
+	VkCommandBuffer cmd = scoped.Get();
+
+	for (uint32_t i = 0; i < cubemapCount; ++i)
+	{
+		CubemapRenderTarget& target = _cubemapRenderUnit.targets[i];
+
+		{
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = target.renderDepth.image;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			barrier.subresourceRange.baseMipLevel = 0;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 6;
+			barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+			vkCmdPipelineBarrier(
+				cmd,
+				VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &barrier);
+		}
+
+		{
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = target.prevDepth.image;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			barrier.subresourceRange.baseMipLevel = 0;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 6;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			vkCmdPipelineBarrier(
+				cmd,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &barrier);
+		}
+
+		VkImageCopy region{};
+		region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		region.srcSubresource.mipLevel = 0;
+		region.srcSubresource.baseArrayLayer = 0;
+		region.srcSubresource.layerCount = 6;
+
+		region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		region.dstSubresource.mipLevel = 0;
+		region.dstSubresource.baseArrayLayer = 0;
+		region.dstSubresource.layerCount = 6;
+
+		region.extent.width = _cubemapSize;
+		region.extent.height = _cubemapSize;
+		region.extent.depth = 1;
+
+		vkCmdCopyImage(
+			cmd,
+			target.renderDepth.image,
+			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			target.prevDepth.image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			1,
+			&region);
+
+		{
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = target.prevDepth.image;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			barrier.subresourceRange.baseMipLevel = 0;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 6;
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			vkCmdPipelineBarrier(
+				cmd,
+				VK_PIPELINE_STAGE_TRANSFER_BIT,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				0, nullptr,
+				0, nullptr,
+				1, &barrier);
+		}
+	}
+
+	scoped.SubmitTimeline(
+		graphicsQueue,
+		waitSemaphore,
+		waitValue,
+		VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+		signalSemaphore,
+		signalValue,
+		VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+}
+void CubemapRenderInstance::TransitionDepthForCopy(
+	VkCommandBuffer cmd,
+	VkImage image,
+	VkImageLayout oldLayout,
+	VkImageLayout newLayout)
+{
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = oldLayout;
+	barrier.newLayout = newLayout;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount = 6;
+
+	barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &barrier);
+}
+
+void CubemapRenderInstance::TransitionDepthToShaderRead(
+	VkCommandBuffer cmd,
+	VkImage image,
+	VkImageLayout oldLayout,
+	VkImageLayout newLayout)
+{
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = oldLayout;
+	barrier.newLayout = newLayout;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount = 6;
+
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &barrier);
+}
+
+void CubemapRenderInstance::TransitionDepthForReuse(
+	VkCommandBuffer cmd,
+	VkImage image,
+	VkImageLayout oldLayout,
+	VkImageLayout newLayout)
+{
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = oldLayout;
+	barrier.newLayout = newLayout;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount = 6;
+
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &barrier);
 }
 
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(

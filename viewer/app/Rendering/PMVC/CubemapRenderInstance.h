@@ -18,6 +18,14 @@
 class CubemapManager;
 struct CubemapWorkRange;
 
+struct CubemapDepthLayer
+{
+	VkImage image = VK_NULL_HANDLE;
+	VkDeviceMemory memory = VK_NULL_HANDLE;
+	VkImageView view = VK_NULL_HANDLE;
+	std::array<VkImageView, 6> faceViews{};
+};
+
 struct CubemapRenderTarget
 {
 	VkImage        cubemapImage;
@@ -25,16 +33,19 @@ struct CubemapRenderTarget
 	VkImageView    cubemapView;
 	std::array<VkImageView, 6> faceViews;
 
-	VkImage        depthImage;
-	VkDeviceMemory depthMemory;
-	VkImageView    depthView;
-	std::array<VkImageView, 6> depthViews;
+	// writable depth attachment
+	CubemapDepthLayer renderDepth;
+
+	// copied previous layer, sampled in fragment shader
+	CubemapDepthLayer prevDepth;
 	
 	std::array<VkFramebuffer, 6> framebuffers;
 };
 
 struct CubemapRenderUnit
 {
+	std::vector<VkDescriptorSet> prevDepthDescriptorSets;
+
 	std::vector<CubemapRenderTarget> targets;
 
 	std::vector<std::array<VkCommandBuffer, 6>> graphicsCmdPerTarget;
@@ -108,6 +119,28 @@ public:
 
 private:
 	//CubemapManager& _cubemapManager;
+	void TransitionDepthForReuse(
+		VkCommandBuffer cmd,
+		VkImage image,
+		VkImageLayout oldLayout,
+		VkImageLayout newLayout);
+	void TransitionDepthToShaderRead(
+		VkCommandBuffer cmd,
+		VkImage image,
+		VkImageLayout oldLayout,
+		VkImageLayout newLayout);
+	void TransitionDepthForCopy(
+		VkCommandBuffer cmd,
+		VkImage image,
+		VkImageLayout oldLayout,
+		VkImageLayout newLayout);
+	void RecordAndSubmitDepthCopyTransitions(
+		uint32_t cubemapCount,
+		VkSemaphore waitSemaphore,
+		uint64_t waitValue,
+		VkSemaphore signalSemaphore,
+		uint64_t signalValue);
+
 
 	std::unique_ptr<ICubemapComputeStrategy> _computeStage;
 	

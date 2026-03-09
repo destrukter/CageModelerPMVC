@@ -612,7 +612,7 @@ void GpuSerialComputeStrategy::UpdateComputeDescriptorSet(uint32_t slotIndex, co
 
 	VkDescriptorImageInfo depthImageInfo{};
 	depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthImageInfo.imageView = target.depthView;  // You need to add this to CubemapRenderTarget
+	depthImageInfo.imageView = target.renderDepth.view;  // You need to add this to CubemapRenderTarget
 	depthImageInfo.sampler = _depthSampler;
 
 	

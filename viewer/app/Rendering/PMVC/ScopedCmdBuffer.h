@@ -30,8 +30,6 @@ public:
 
     void SubmitAndWait(VkQueue queue)
     {
-        //VK_ASSERT(!_submitted);
-
         VK_CHECK(vkEndCommandBuffer(_cmd));
 
         VkSubmitInfo submitInfo{};
@@ -47,8 +45,6 @@ public:
 
     void Submit(VkQueue queue, VkFence fence = VK_NULL_HANDLE)
     {
-        //VK_ASSERT(!_submitted);
-
         VK_CHECK(vkEndCommandBuffer(_cmd));
 
         VkSubmitInfo submitInfo{};
@@ -57,6 +53,49 @@ public:
         submitInfo.pCommandBuffers = &_cmd;
 
         VK_CHECK(vkQueueSubmit(queue, 1, &submitInfo, fence));
+
+        _submitted = true;
+    }
+
+    void SubmitTimeline(
+        VkQueue queue,
+        VkSemaphore waitSemaphore,
+        uint64_t waitValue,
+        VkPipelineStageFlags2 waitStageMask,
+        VkSemaphore signalSemaphore,
+        uint64_t signalValue,
+        VkPipelineStageFlags2 signalStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+    {
+        VK_CHECK(vkEndCommandBuffer(_cmd));
+
+        VkCommandBufferSubmitInfo cmdInfo{};
+        cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmdInfo.commandBuffer = _cmd;
+
+        VkSemaphoreSubmitInfo waitInfo{};
+        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitInfo.semaphore = waitSemaphore;
+        waitInfo.value = waitValue;
+        waitInfo.stageMask = waitStageMask;
+        waitInfo.deviceIndex = 0;
+
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = signalSemaphore;
+        signalInfo.value = signalValue;
+        signalInfo.stageMask = signalStageMask;
+        signalInfo.deviceIndex = 0;
+
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.waitSemaphoreInfoCount = 1;
+        submitInfo.pWaitSemaphoreInfos = &waitInfo;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &cmdInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+        VK_CHECK(vkQueueSubmit2(queue, 1, &submitInfo, VK_NULL_HANDLE));
 
         _submitted = true;
     }
