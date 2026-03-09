@@ -11,8 +11,7 @@
     "eigen3",
     "boost-program-options",
     "blas",
-    "lapack-reference",
-    "nlohmann-json"
+    "lapack-reference"
   ],
   "builtin-baseline": "c45ac46dcc16dd588daa029f7ce5bcacc5d7645b",
   "overrides": [
