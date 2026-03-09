@@ -28,6 +28,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+
 namespace
 {
 	constexpr auto VertexSelectionMinDistanceThresholdSq = 50.0f;
