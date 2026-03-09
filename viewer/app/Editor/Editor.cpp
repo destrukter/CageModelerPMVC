@@ -17,7 +17,16 @@
 #include <UI/ProjectOptionsPanel.h>
 #include <UI/ProjectSettingsPanel.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <thread>
 #include <filesystem>
+#include <fstream>
+#include <unordered_map>
+
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 
 namespace
 {
@@ -77,6 +86,45 @@ namespace
 	[[nodiscard]] inline bool HasModifierKeysPressed(const SDL_Keymod modifierKeys)
 	{
 		return IsSet(modifierKeys, SDL_KMOD_LSHIFT) || IsSet(modifierKeys, SDL_KMOD_LALT) || IsSet(modifierKeys, SDL_KMOD_LGUI);
+	}
+
+	[[nodiscard]] std::string ToLower(std::string value)
+	{
+		std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return value;
+	}
+
+	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value)
+	{
+		static const std::unordered_map<std::string, DeformationType> mapping = {
+			{ "mvc", DeformationType::MVC },
+			{ "qmvc", DeformationType::QMVC },
+			{ "harmonic", DeformationType::Harmonic },
+			{ "bbw", DeformationType::BBW },
+			{ "lbc", DeformationType::LBC },
+			{ "mec", DeformationType::MEC },
+			{ "mlc", DeformationType::MLC },
+			{ "green", DeformationType::Green },
+			{ "qgc", DeformationType::QGC },
+			{ "somigliana", DeformationType::Somigliana },
+			{ "pmvcserialoffset", DeformationType::PMVCSerialOffset },
+			{ "pmvcserialnooffset", DeformationType::PMVCSerialNoOffset },
+			{ "pmvcringoffset", DeformationType::PMVCRingOffset },
+			{ "pmvcringnooffset", DeformationType::PMVCRingNoOffset },
+			{ "pmvcalloffset", DeformationType::PMVCAllOffset },
+			{ "pmvcallnooffset", DeformationType::PMVCAllNoOffset },
+			{ "pmvccpuoffset", DeformationType::PMVCCpuOffset },
+			{ "pmvccpunooffset", DeformationType::PMVCCpuNoOffset },
+			{ "raytracing", DeformationType::Raytracing }
+		};
+
+		const auto it = mapping.find(ToLower(value));
+		if (it == mapping.end())
+		{
+			return std::nullopt;
+		}
+
+		return it->second;
 	}
 }
 
@@ -143,15 +191,139 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 	_newProjectPanel->SetModel(_projectModel);
 	_projectOptionsPanel->SetModelData(_projectModel);
 
-
 	StartEvaluation();
 	//OnNewProjectCreated();
 //#endif
 }
 
-void Editor::StartEvaluation() {
+void Editor::StartEvaluation()
+{
+	constexpr auto kEvaluationRoot = std::filesystem::path("evaluation");
+	constexpr auto kEvaluationConfig = "projects.json";
 
+	const auto evaluationRoot = std::filesystem::absolute(kEvaluationRoot);
+	const auto configPath = evaluationRoot / kEvaluationConfig;
+	if (!std::filesystem::exists(configPath))
+	{
+		LOG_WARN("Evaluation config '{}' does not exist. Skipping evaluation run.", configPath.string());
+		return;
+	}
+
+	boost::property_tree::ptree config;
+	try
+	{
+		boost::property_tree::read_json(configPath.string(), config);
+	}
+	catch (const std::exception& ex)
+	{
+		LOG_ERROR("Failed to parse evaluation json '{}': {}", configPath.string(), ex.what());
+		return;
+	}
+
+	const auto projectsOptional = config.get_child_optional("projects");
+	if (!projectsOptional.has_value())
+	{
+		LOG_ERROR("Evaluation config '{}' must contain a 'projects' array.", configPath.string());
+		return;
+	}
+
+	const auto& projects = projectsOptional.value();
+	const auto timingOutputPath = evaluationRoot / config.get<std::string>("timingsFile", "timings.txt");
+	std::ofstream timingOutput(timingOutputPath, std::ios::out | std::ios::trunc);
+	if (!timingOutput.is_open())
+	{
+		LOG_ERROR("Unable to open timing output file '{}'.", timingOutputPath.string());
+		return;
+	}
+
+#ifdef NDEBUG
+	constexpr auto buildType = "Release";
+#else
+	constexpr auto buildType = "Debug/Development";
+#endif
+
+	timingOutput << "BuildType=" << buildType << "\n";
+	timingOutput << "ProjectCount=" << projects.size() << "\n";
+
+	std::size_t i = 0;
+	for (const auto& projectPair : projects)
+	{
+		const auto& project = projectPair.second;
+		if (!project.get_optional<std::string>("mesh").has_value() ||
+			!project.get_optional<std::string>("cage").has_value() ||
+			!project.get_optional<std::string>("deformedCage").has_value())
+		{
+			LOG_WARN("Skipping project {} due to missing required file keys (mesh/cage/deformedCage).", i);
+			++i;
+			continue;
+		}
+
+		const auto coordinateType = project.get<std::string>("coordinateType", "MVC");
+		const auto deformationType = ParseDeformationType(coordinateType);
+		if (!deformationType.has_value())
+		{
+			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", i, coordinateType);
+			++i;
+			continue;
+		}
+
+		const auto projectName = project.get<std::string>("name", std::string("project_") + std::to_string(i));
+		const auto projectOutputDir = evaluationRoot / projectName;
+		std::filesystem::create_directories(projectOutputDir);
+
+		_projectModel->_deformationType = *deformationType;
+		_projectModel->_meshFilepath = evaluationRoot / project.get<std::string>("mesh");
+		_projectModel->_cageFilepath = evaluationRoot / project.get<std::string>("cage");
+		_projectModel->_deformedCageFilepath = evaluationRoot / project.get<std::string>("deformedCage");
+
+		if (const auto embedding = project.get_optional<std::string>("embedding"))
+		{
+			_projectModel->_embeddingFilepath = evaluationRoot / embedding.value();
+		}
+		else
+		{
+			_projectModel->_embeddingFilepath = std::nullopt;
+		}
+
+		if (const auto samples = project.get_optional<int32_t>("samples"))
+		{
+			_projectModel->_numSamples = samples.value();
+		}
+
+		const auto start = std::chrono::steady_clock::now();
+		OnNewProjectCreated();
+
+		while (_isComputingWeightsData.load(std::memory_order_relaxed) ||
+			_isComputingDeformationData.load(std::memory_order_relaxed))
+		{
+			FunctionWrapper mainThreadFunction;
+			while (_mainThreadQueue->TryPop(mainThreadFunction))
+			{
+				mainThreadFunction();
+			}
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		FunctionWrapper mainThreadFunction;
+		while (_mainThreadQueue->TryPop(mainThreadFunction))
+		{
+			mainThreadFunction();
+		}
+
+		const auto end = std::chrono::steady_clock::now();
+		const auto elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+		ExportWeights(projectOutputDir / "weights.dmat");
+		ExportDeformedCage(projectOutputDir / "deformed_cage.obj");
+		ExportDeformedMeshes(projectOutputDir / "deformed_mesh.obj");
+
+		timingOutput << projectName << "," << coordinateType << "," << elapsedMs << '\n';
+		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
+		++i;
+	}
 }
+
 
 void Editor::CreateSceneLights() const
 {
