@@ -25,7 +25,9 @@
 #include <fstream>
 #include <unordered_map>
 
-#include <nlohmann/json.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+
 
 namespace
 {
@@ -208,31 +210,26 @@ void Editor::StartEvaluation()
 		return;
 	}
 
-	std::ifstream configFile(configPath);
-	if (!configFile.is_open())
-	{
-		LOG_ERROR("Unable to open evaluation config '{}'.", configPath.string());
-		return;
-	}
-
-	nlohmann::json config;
+	boost::property_tree::ptree config;
 	try
 	{
-		configFile >> config;
+		boost::property_tree::read_json(configPath.string(), config);
 	}
-	catch (const nlohmann::json::exception& ex)
+	catch (const std::exception& ex)
 	{
 		LOG_ERROR("Failed to parse evaluation json '{}': {}", configPath.string(), ex.what());
 		return;
 	}
 
-	if (!config.contains("projects") || !config["projects"].is_array())
+	const auto projectsOptional = config.get_child_optional("projects");
+	if (!projectsOptional.has_value())
 	{
 		LOG_ERROR("Evaluation config '{}' must contain a 'projects' array.", configPath.string());
 		return;
 	}
 
-	const auto timingOutputPath = evaluationRoot / config.value("timingsFile", "timings.txt");
+	const auto& projects = projectsOptional.value();
+	const auto timingOutputPath = evaluationRoot / config.get<std::string>("timingsFile", "timings.txt");
 	std::ofstream timingOutput(timingOutputPath, std::ios::out | std::ios::trunc);
 	if (!timingOutput.is_open())
 	{
@@ -247,46 +244,51 @@ void Editor::StartEvaluation()
 #endif
 
 	timingOutput << "BuildType=" << buildType << "\n";
-	timingOutput << "ProjectCount=" << config["projects"].size() << "\n";
+	timingOutput << "ProjectCount=" << projects.size() << "\n";
 
-	for (std::size_t i = 0; i < config["projects"].size(); ++i)
+	std::size_t i = 0;
+	for (const auto& projectPair : projects)
 	{
-		const auto& project = config["projects"][i];
-		if (!project.contains("mesh") || !project.contains("cage") || !project.contains("deformedCage"))
+		const auto& project = projectPair.second;
+		if (!project.get_optional<std::string>("mesh").has_value() ||
+			!project.get_optional<std::string>("cage").has_value() ||
+			!project.get_optional<std::string>("deformedCage").has_value())
 		{
 			LOG_WARN("Skipping project {} due to missing required file keys (mesh/cage/deformedCage).", i);
+			++i;
 			continue;
 		}
 
-		const auto coordinateType = project.value("coordinateType", std::string("MVC"));
+		const auto coordinateType = project.get<std::string>("coordinateType", "MVC");
 		const auto deformationType = ParseDeformationType(coordinateType);
 		if (!deformationType.has_value())
 		{
 			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", i, coordinateType);
+			++i;
 			continue;
 		}
 
-		const auto projectName = project.value("name", std::string("project_") + std::to_string(i));
+		const auto projectName = project.get<std::string>("name", std::string("project_") + std::to_string(i));
 		const auto projectOutputDir = evaluationRoot / projectName;
 		std::filesystem::create_directories(projectOutputDir);
 
 		_projectModel->_deformationType = *deformationType;
-		_projectModel->_meshFilepath = evaluationRoot / project.at("mesh").get<std::string>();
-		_projectModel->_cageFilepath = evaluationRoot / project.at("cage").get<std::string>();
-		_projectModel->_deformedCageFilepath = evaluationRoot / project.at("deformedCage").get<std::string>();
+		_projectModel->_meshFilepath = evaluationRoot / project.get<std::string>("mesh");
+		_projectModel->_cageFilepath = evaluationRoot / project.get<std::string>("cage");
+		_projectModel->_deformedCageFilepath = evaluationRoot / project.get<std::string>("deformedCage");
 
-		if (project.contains("embedding"))
+		if (const auto embedding = project.get_optional<std::string>("embedding"))
 		{
-			_projectModel->_embeddingFilepath = evaluationRoot / project.at("embedding").get<std::string>();
+			_projectModel->_embeddingFilepath = evaluationRoot / embedding.value();
 		}
 		else
 		{
 			_projectModel->_embeddingFilepath = std::nullopt;
 		}
 
-		if (project.contains("samples"))
+		if (const auto samples = project.get_optional<int32_t>("samples"))
 		{
-			_projectModel->_numSamples = project.at("samples").get<int32_t>();
+			_projectModel->_numSamples = samples.value();
 		}
 
 		const auto start = std::chrono::steady_clock::now();
@@ -319,8 +321,10 @@ void Editor::StartEvaluation()
 
 		timingOutput << projectName << "," << coordinateType << "," << elapsedMs << '\n';
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
+		++i;
 	}
 }
+
 
 void Editor::CreateSceneLights() const
 {
