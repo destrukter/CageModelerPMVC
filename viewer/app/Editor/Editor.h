@@ -11,6 +11,8 @@
 #include <Rendering//PMVC/CubemapRenderInstance.h>
 #include <Rendering/PMVC/Raytracer.h>
 
+#include <future>
+
 class ProjectSettingsPanel;
 class ProjectOptionsPanel;
 class ThreadPool;
@@ -59,7 +61,7 @@ private:
 	/**
 	 * Invoked when a new project has been created from the window.
 	 */
-	void OnNewProjectCreated();
+	void OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& completionPromise = nullptr);
 
 	/**
 	 * Invoked when the project settings have been changed and new ones have been applied.
