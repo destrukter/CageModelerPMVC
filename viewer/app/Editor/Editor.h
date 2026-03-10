@@ -216,6 +216,7 @@ private:
 	void OnSequencerEndedDragging();
 
 private:
+	bool _isEvaluationMode = false;
 	std::atomic<bool> _projectCreationFailed = false;
 
 	/// A pointer to the input system to get input information.
