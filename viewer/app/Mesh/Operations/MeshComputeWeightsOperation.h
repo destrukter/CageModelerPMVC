@@ -7,6 +7,8 @@
 struct MeshComputeWeightsOperationParams
 {
 	MeshComputeWeightsOperationParams(const DeformationType deformationType,
+		const PMVCComputeType pmvcComputeType,
+		const bool pmvcUseOffset,
 		const LBC::DataSetup::WeightingScheme LBCScheme,
 		EigenMesh mesh,
 		EigenMesh cageMesh,
@@ -22,6 +24,8 @@ struct MeshComputeWeightsOperationParams
 		const int32_t numBBWSteps = 300,
 		const int32_t numSamples = 1)
 		: _deformationType(deformationType)
+		, _pmvcComputeType(pmvcComputeType)
+		, _pmvcUseOffset(pmvcUseOffset)
 		, _LBCScheme(LBCScheme)
 		, _mesh(std::move(mesh))
 		, _cage(std::move(cageMesh))
@@ -40,6 +44,8 @@ struct MeshComputeWeightsOperationParams
 	{ }
 
 	DeformationType _deformationType = DeformationType::Green;
+	PMVCComputeType _pmvcComputeType = PMVCComputeType::All;
+	bool _pmvcUseOffset = false;
 	LBC::DataSetup::WeightingScheme _LBCScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 	EigenMesh _mesh;
 	EigenMesh _cage;

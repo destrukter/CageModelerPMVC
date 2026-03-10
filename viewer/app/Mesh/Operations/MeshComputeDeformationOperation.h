@@ -8,6 +8,8 @@
 struct MeshComputeDeformationOperationParams
 {
 	MeshComputeDeformationOperationParams(const DeformationType deformationType,
+		const PMVCComputeType pmvcComputeType,
+		const bool pmvcUseOffset,
 		const LBC::DataSetup::WeightingScheme LBCScheme,
 		const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
 		EigenMesh mesh,
@@ -18,6 +20,8 @@ struct MeshComputeDeformationOperationParams
 		const int32_t numSamples,
 		const bool interpolateWeights)
 		: _deformationType(deformationType)
+		, _pmvcComputeType(pmvcComputeType)
+		, _pmvcUseOffset(pmvcUseOffset)
 		, _LBCScheme(LBCScheme)
 		, _somiglianaDeformer(somiglianaDeformer)
 		, _mesh(std::move(mesh))
@@ -30,6 +34,8 @@ struct MeshComputeDeformationOperationParams
 	{ }
 
 	DeformationType _deformationType = DeformationType::Green;
+	PMVCComputeType _pmvcComputeType = PMVCComputeType::All;
+	bool _pmvcUseOffset = false;
 	LBC::DataSetup::WeightingScheme _LBCScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;

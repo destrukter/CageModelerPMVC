@@ -20,15 +20,16 @@ struct ProjecSettingsHelpers
 		"Green",
 		"QGC",
 		"Somigliana",
-		"PMVCSerialOffset",
-	"PMVCSerialNoOffset",
-	"PMVCRingOffset",
-	"PMVCRingNoOffset",
-	"PMVCAllOffset",
-	"PMVCAllNoOffset",
-	"PMVCCpuOffset",
-	"PMVCCpuNoOffset",
+		"PMVC",
 	"Raytracing"
+	};
+
+	
+	static constexpr std::array PMVCComputeMethodNames = {
+		"Serial",
+		"Ring",
+		"All",
+		"Cpu"
 	};
 
 	static constexpr std::array LBCWeightingSchemeNames = {

@@ -283,6 +283,42 @@ void NewProjectPanel::Layout()
 				ImGui::SameLine();
 			}
 
+			ImGui::BeginDisabled(_model->_deformationType != DeformationType::PMVC);
+			{
+				ImGui::TableNextRow();
+				{
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextEx("PMVC Compute Type");
+
+					ImGui::TableSetColumnIndex(1);
+					UIHelpers::SetRightAligned(125.0f);
+					if (ImGui::BeginCombo("##PMVCComputeType", ProjecSettingsHelpers::PMVCComputeMethodNames[static_cast<uint32_t>(_model->_pmvcComputeType)], ImGuiComboFlags_HeightRegular))
+					{
+						for (auto i = 0; i < ProjecSettingsHelpers::PMVCComputeMethodNames.size(); i++)
+						{
+							const auto isSelected = (static_cast<uint32_t>(_model->_pmvcComputeType) == i);
+							if (ImGui::Selectable(ProjecSettingsHelpers::PMVCComputeMethodNames[i], isSelected))
+							{
+								_model->_pmvcComputeType = static_cast<PMVCComputeType>(i);
+							}
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				ImGui::TableNextRow();
+				{
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextEx("PMVC use offset");
+
+					ImGui::TableSetColumnIndex(1);
+					UIHelpers::SetRightAligned(25.0f);
+					ImGui::Checkbox("##PMVCUseOffset", &_model->_pmvcUseOffset);
+					ImGui::SameLine();
+				}
+			}
+			ImGui::EndDisabled();
+
 			ImGui::BeginDisabled(_model->_deformationType != DeformationType::BBW && _model->_deformationType != DeformationType::LBC);
 			{
 				ImGui::TableNextRow();
@@ -444,4 +480,3 @@ std::shared_ptr<ProjectModelData> NewProjectPanel::GetModel() const
 { 
 	return _model; 
 }
-

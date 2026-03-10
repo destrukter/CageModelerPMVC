@@ -135,6 +135,8 @@ private:
 		EigenMesh cage,
 		EigenMesh deformedCage,
 		const DeformationType deformationType,
+		const PMVCComputeType pmvcComputeType,
+		const bool pmvcUseOffset,
 		const LBC::DataSetup::WeightingScheme weightingScheme,
 		const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
 		const int32_t modelVerticesOffset,

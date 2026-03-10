@@ -96,11 +96,15 @@ namespace
 	}
 
 	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value);
+	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value);
+	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key);
 
 	struct EvaluationProjectConfig
 	{
 		std::string _name;
 		std::string _coordinateType = "MVC";
+		std::string _pmvcComputeType = "All";
+		std::optional<bool> _pmvcUseOffset;
 		std::string _mesh;
 		std::string _cage;
 		std::string _deformedCage;
@@ -133,6 +137,18 @@ namespace
 		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
 		{
 			return static_cast<int32_t>(std::stoi(match[1].str()));
+		}
+		return std::nullopt;
+	}
+
+
+	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\s*:\s*(true|false)");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return match[1].str() == "true";
 		}
 		return std::nullopt;
 	}
@@ -234,6 +250,8 @@ namespace
 			EvaluationProjectConfig project;
 			project._name = ExtractJsonStringValue(objectText, "name").value_or("");
 			project._coordinateType = ExtractJsonStringValue(objectText, "coordinateType").value_or("MVC");
+			project._pmvcComputeType = ExtractJsonStringValue(objectText, "pmvcComputeType").value_or("All");
+			project._pmvcUseOffset = ExtractJsonBoolValue(objectText, "pmvcUseOffset");
 			project._mesh = ExtractJsonStringValue(objectText, "mesh").value_or("");
 			project._cage = ExtractJsonStringValue(objectText, "cage").value_or("");
 			project._deformedCage = ExtractJsonStringValue(objectText, "deformedCage").value_or("");
@@ -256,6 +274,11 @@ namespace
 		if (const auto deformationType = ParseDeformationType(project._coordinateType); !deformationType.has_value())
 		{
 			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", projectIndex, project._coordinateType);
+			return false;
+		}
+		else if (*deformationType == DeformationType::PMVC && !ParsePMVCComputeType(project._pmvcComputeType).has_value())
+		{
+			LOG_WARN("Skipping project {} due to unsupported pmvcComputeType '{}'.", projectIndex, project._pmvcComputeType);
 			return false;
 		}
 
@@ -281,14 +304,15 @@ namespace
 			{ "green", DeformationType::Green },
 			{ "qgc", DeformationType::QGC },
 			{ "somigliana", DeformationType::Somigliana },
-			{ "pmvcserialoffset", DeformationType::PMVCSerialOffset },
-			{ "pmvcserialnooffset", DeformationType::PMVCSerialNoOffset },
-			{ "pmvcringoffset", DeformationType::PMVCRingOffset },
-			{ "pmvcringnooffset", DeformationType::PMVCRingNoOffset },
-			{ "pmvcalloffset", DeformationType::PMVCAllOffset },
-			{ "pmvcallnooffset", DeformationType::PMVCAllNoOffset },
-			{ "pmvccpuoffset", DeformationType::PMVCCpuOffset },
-			{ "pmvccpunooffset", DeformationType::PMVCCpuNoOffset },
+			{ "pmvc", DeformationType::PMVC },
+			{ "pmvcserialoffset", DeformationType::PMVC },
+			{ "pmvcserialnooffset", DeformationType::PMVC },
+			{ "pmvcringoffset", DeformationType::PMVC },
+			{ "pmvcringnooffset", DeformationType::PMVC },
+			{ "pmvcalloffset", DeformationType::PMVC },
+			{ "pmvcallnooffset", DeformationType::PMVC },
+			{ "pmvccpuoffset", DeformationType::PMVC },
+			{ "pmvccpunooffset", DeformationType::PMVC },
 			{ "raytracing", DeformationType::Raytracing }
 		};
 
@@ -300,6 +324,22 @@ namespace
 
 		return it->second;
 	}
+	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value)
+	{
+		static const std::unordered_map<std::string, PMVCComputeType> mapping = {
+			{ "serial", PMVCComputeType::Serial },
+			{ "ring", PMVCComputeType::Ring },
+			{ "all", PMVCComputeType::All },
+			{ "cpu", PMVCComputeType::Cpu }
+		};
+		const auto it = mapping.find(ToLower(value));
+		if (it == mapping.end())
+		{
+			return std::nullopt;
+		}
+		return it->second;
+	}
+
 }
 
 Editor::Editor(const SubsystemPtr<InputSubsystem>& inputSubsystem,
@@ -355,7 +395,9 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCancelled(); },
 		[this] { OnNewProjectCreated(); });
 
-	_projectModel->_deformationType = DeformationType::PMVCAllNoOffset;
+	_projectModel->_deformationType = DeformationType::PMVC;
+	_projectModel->_pmvcComputeType = PMVCComputeType::All;
+	_projectModel->_pmvcUseOffset = false;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
 	_projectModel->_meshFilepath = "assets/meshes/armadilloman.obj";
@@ -439,6 +481,8 @@ void Editor::StartEvaluation()
 		std::filesystem::create_directories(projectOutputDir);
 
 		_projectModel->_deformationType = *deformationType;
+		_projectModel->_pmvcComputeType = ParsePMVCComputeType(project._pmvcComputeType).value_or(PMVCComputeType::All);
+		_projectModel->_pmvcUseOffset = project._pmvcUseOffset.value_or(false);
 		_projectModel->_meshFilepath = evaluationRoot / project._mesh;
 		_projectModel->_cageFilepath = evaluationRoot / project._cage;
 		_projectModel->_deformedCageFilepath = evaluationRoot / project._deformedCage;
@@ -862,6 +906,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 
 		auto projectResult = _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
 			projectModelSnapshot->_deformationType,
+			projectModelSnapshot->_pmvcComputeType,
 			projectModelSnapshot->_LBCWeightingScheme,
 			projectModelSnapshot->_meshFilepath.value(),
 			projectModelSnapshot->_cageFilepath.value(),
@@ -875,6 +920,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 			projectModelSnapshot->_interpolateWeights,
 			projectModelSnapshot->_findOffset,
 			projectModelSnapshot->_noOffset,
+			projectModelSnapshot->_pmvcUseOffset,
 			projectModelSnapshot->_somigNu,
 			projectModelSnapshot->_somiglianaDeformer);
 
@@ -906,7 +952,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 					_cubemapRenderer->Initialize(static_cast<uint32_t>(projectModelSnapshot->_cubemapSize));
 					_cubemapRenderer->SetCage(projectData->_cage);
 					_cubemapRenderer->SetMesh(projectData->_mesh);
-					promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_deformationType));
+					promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_pmvcComputeType, projectData->_pmvcUseOffset));
 				}
 				catch (...)
 				{
@@ -1000,6 +1046,8 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 			projectData->_cage,
 			projectData->_deformedCage,
 			projectData->_deformationType,
+			projectData->_pmvcComputeType,
+			projectData->_pmvcUseOffset,
 			projectData->_LBCWeightingScheme,
 			projectData->_somiglianaDeformer,
 			projectData->_modelVerticesOffset,
@@ -1358,6 +1406,8 @@ void Editor::OnMouseClickReleased(const InputActionParams& actionParams)
 			deformedMesh = _scene->GetMesh(_deformedCageHandle)->CopyAsEigen(),
 			somiglianaDeformer = _projectData->_somiglianaDeformer,
 			deformationType = _projectData->_deformationType,
+			pmvcComputeType = _projectData->_pmvcComputeType,
+			pmvcUseOffset = _projectData->_pmvcUseOffset,
 			weightingScheme = _projectData->_LBCWeightingScheme,
 			modelVerticesOffset = _projectData->_modelVerticesOffset,
 			numSamples = _projectData->_numSamples,
@@ -1369,6 +1419,8 @@ void Editor::OnMouseClickReleased(const InputActionParams& actionParams)
 				std::move(cage),
 				std::move(deformedMesh),
 				deformationType,
+				pmvcComputeType,
+				pmvcUseOffset,
 				weightingScheme,
 				somiglianaDeformer,
 				modelVerticesOffset,
@@ -1590,6 +1642,8 @@ void Editor::OnSequencerNumFramesChanged(const uint32_t currentFrameIndex, const
 		deformedMesh = _scene->GetMesh(_deformedCageHandle)->CopyAsEigen(),
 		somiglianaDeformer = _projectData->_somiglianaDeformer,
 		deformationType = _projectData->_deformationType,
+		pmvcComputeType = _projectData->_pmvcComputeType,
+		pmvcUseOffset = _projectData->_pmvcUseOffset,
 		weightingScheme = _projectData->_LBCWeightingScheme,
 		modelVerticesOffset = _projectData->_modelVerticesOffset,
 		numSamples = _projectData->_numSamples,
@@ -1602,6 +1656,8 @@ void Editor::OnSequencerNumFramesChanged(const uint32_t currentFrameIndex, const
 			std::move(cage),
 			std::move(deformedMesh),
 			deformationType,
+			pmvcComputeType,
+			pmvcUseOffset,
 			weightingScheme,
 			somiglianaDeformer,
 			modelVerticesOffset,
@@ -1742,6 +1798,7 @@ MeshOperationResult<std::shared_ptr<ProjectData>> Editor::CreateProject() const
 {
 	return _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
 		_projectModel->_deformationType,
+		_projectModel->_pmvcComputeType,
 		_projectModel->_LBCWeightingScheme,
 		_projectModel->_meshFilepath.value(),
 		_projectModel->_cageFilepath.value(),
@@ -1755,6 +1812,7 @@ MeshOperationResult<std::shared_ptr<ProjectData>> Editor::CreateProject() const
 		_projectModel->_interpolateWeights,
 		_projectModel->_findOffset,
 		_projectModel->_noOffset,
+		_projectModel->_pmvcUseOffset,
 		_projectModel->_somigNu,
 		_projectModel->_somiglianaDeformer
 		);
@@ -1764,6 +1822,8 @@ MeshOperationResult<MeshComputeWeightsOperationResult> Editor::ComputeCageWeight
 {
 	return _meshOperationSystem->ExecuteOperation<MeshComputeWeightsOperation>(
 		projectData._deformationType,
+		projectData._pmvcComputeType,
+		projectData._pmvcUseOffset,
 		projectData._LBCWeightingScheme,
 		projectData._mesh,
 		projectData._cage,
@@ -1783,6 +1843,8 @@ MeshOperationResult<MeshComputeDeformationOperationResult> Editor::ComputeDeform
 	EigenMesh cage,
 	EigenMesh deformedCage,
 	const DeformationType deformationType,
+	const PMVCComputeType pmvcComputeType,
+	const bool pmvcUseOffset,
 	const LBC::DataSetup::WeightingScheme weightingScheme,
 	const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
 	const int32_t modelVerticesOffset,
@@ -1793,6 +1855,8 @@ MeshOperationResult<MeshComputeDeformationOperationResult> Editor::ComputeDeform
 
 	return _meshOperationSystem->ExecuteOperation<MeshComputeDeformationOperation>(
 		deformationType,
+		pmvcComputeType,
+		pmvcUseOffset,
 		weightingScheme,
 		somiglianaDeformer,
 		std::move(mesh),
