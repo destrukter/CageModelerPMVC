@@ -216,6 +216,8 @@ private:
 	void OnSequencerEndedDragging();
 
 private:
+	std::atomic<bool> _projectCreationFailed = false;
+
 	/// A pointer to the input system to get input information.
 	SubsystemPtr<InputSubsystem> _inputSubsystem = nullptr;
 
