@@ -781,6 +781,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	);
 	const uint32_t cubemapCount = end - range.first;
 	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
+	const auto renderStart = std::chrono::steady_clock::now();
 
 	if (cubemapCount == 0 || slotCount == 0)
 	{
@@ -839,8 +840,14 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		timelineValue = copyDone;
 		computeStage->ConsumeAllSlots();
 	}
+	const auto renderEnd = std::chrono::steady_clock::now();
+	_renderMs = std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+	const auto computeStart = renderEnd;
 
 	weights = computeStage->Readback();
+	const auto computeEnd = std::chrono::steady_clock::now();
+	_computeMs = std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(computeEnd - totalStart).count();
 }
 
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
@@ -1112,6 +1119,7 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	);
 	const uint32_t cubemapCount = end - range.first;
 	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
+	const auto renderStart = std::chrono::steady_clock::now();
 
 	if (cubemapCount == 0 || slotCount == 0)
 	{
@@ -1167,6 +1175,9 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 		timelineValue = readbackDone;
 		computeStage->ConsumeAllSlots();
 	}
+	const auto renderEnd = std::chrono::steady_clock::now();
+	_renderMs = std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+	const auto computeStart = renderEnd;
 
 	weights = computeStage->Readback();
 	const auto computeEnd = std::chrono::steady_clock::now();
