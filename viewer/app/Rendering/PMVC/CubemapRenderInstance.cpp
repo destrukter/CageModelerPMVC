@@ -17,6 +17,11 @@
 #include <Mesh/Operations/MeshWeightsParams.h>
 
 CubemapRenderInstance::~CubemapRenderInstance() {
+	if (_depthSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(_device, _depthSampler, nullptr);
+		_depthSampler = VK_NULL_HANDLE;
+	}
 	//TODO: cleanup
 }
 
@@ -51,6 +56,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	PipelineHandle cubemapSecondHitPipelineHandle,
 
 	RenderResourceRef<DescriptorSetLayout> matricesLayout,
+	RenderResourceRef<DescriptorSetLayout> prevDepthLayout,
 
 	MemoryMappedBuffer indexBuffer,
 	MemoryMappedBuffer vertexBuffer
@@ -70,6 +76,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _cubemapPipelineHandle(cubemapPipelineHandle)
 , _cubemapSecondHitPipelineHandle(cubemapSecondHitPipelineHandle)
 , _matricesLayout(std::move(matricesLayout))
+, _prevDepthLayout(std::move(prevDepthLayout))
 , _indexBuffer(std::move(indexBuffer))
 , _vertexBuffer(std::move(vertexBuffer))
 , _cubemapPipelineHandleCpu(cubemapPipelineHandleCpu)
@@ -79,6 +86,19 @@ CubemapRenderInstance::CubemapRenderInstance(
 
 void CubemapRenderInstance::Initialize() {
 	_offset = DeformationTypeHelpers::PMVCOffset(_deformationType);
+
+	VkSamplerCreateInfo samplerInfo{};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_NEAREST;
+	samplerInfo.minFilter = VK_FILTER_NEAREST;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.maxLod = 0.0f;
+	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+	samplerInfo.unnormalizedCoordinates = VK_FALSE;
+	VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_depthSampler));
 
 	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
 		_computeStage = std::make_unique<GpuSerialComputeStrategy>(
@@ -226,8 +246,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 
 	// ---------------------------------------------------------------------
 	// Create depth images:
-	//   renderDepth = writable depth attachment
-	//   prevDepth   = copied previous pass depth, sampled in shader
+	//   depthLayers[0/1] ping-pong between writable and sampled roles
 	// ---------------------------------------------------------------------
 	const VkFormat depthFormat = _device->FindDepthFormat();
 
@@ -292,37 +311,40 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VK_CHECK(vkCreateImageView(_device, &arrayViewInfo, nullptr, &layer.view));
 	};
 
-	CreateDepthLayer(target.renderDepth);
-	CreateDepthLayer(target.prevDepth);
+	CreateDepthLayer(target.depthLayers[0]);
+	CreateDepthLayer(target.depthLayers[1]);
 
 	// ---------------------------------------------------------------------
-	// Create framebuffers using renderDepth as the writable depth attachment
+	// Create framebuffers for both ping-pong depth attachments
 	// ---------------------------------------------------------------------
-	for (uint32_t face = 0; face < 6; ++face)
+	for (uint32_t depthLayer = 0; depthLayer < 2; ++depthLayer)
 	{
-		VkImageView attachments[2] = {
-			target.faceViews[face],
-			target.renderDepth.faceViews[face]
-		};
-
-		VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-		if (_deformationType == DeformationType::PMVCCpuNoOffset ||
-			_deformationType == DeformationType::PMVCCpuOffset)
+		for (uint32_t face = 0; face < 6; ++face)
 		{
-			fbInfo.renderPass = _renderPassCpu;
-		}
-		else
-		{
-			fbInfo.renderPass = _renderPass;
-		}
+			VkImageView attachments[2] = {
+				target.faceViews[face],
+				target.depthLayers[depthLayer].faceViews[face]
+			};
 
-		fbInfo.attachmentCount = 2;
-		fbInfo.pAttachments = attachments;
-		fbInfo.width = _cubemapSize;
-		fbInfo.height = _cubemapSize;
-		fbInfo.layers = 1;
+			VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+			if (_deformationType == DeformationType::PMVCCpuNoOffset ||
+				_deformationType == DeformationType::PMVCCpuOffset)
+			{
+				fbInfo.renderPass = _renderPassCpu;
+			}
+			else
+			{
+				fbInfo.renderPass = _renderPass;
+			}
 
-		VK_CHECK(vkCreateFramebuffer(_device, &fbInfo, nullptr, &target.framebuffers[face]));
+			fbInfo.attachmentCount = 2;
+			fbInfo.pAttachments = attachments;
+			fbInfo.width = _cubemapSize;
+			fbInfo.height = _cubemapSize;
+			fbInfo.layers = 1;
+
+			VK_CHECK(vkCreateFramebuffer(_device, &fbInfo, nullptr, &target.framebuffers[depthLayer][face]));
+		}
 	}
 
 	return target;
@@ -365,7 +387,7 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 		&unit.matricesDescriptorSet
 	));
 
-	_cubemapRenderUnit.prevDepthDescriptorSets.resize(_cubemapRenderUnit.targets.size());
+	unit.prevDepthDescriptorSets.resize(_cubemapRenderUnit.targets.size());
 
 	std::vector<VkDescriptorSetLayout> layouts(
 		_cubemapRenderUnit.targets.size(),
@@ -380,7 +402,7 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 	VK_CHECK(vkAllocateDescriptorSets(
 		_device,
 		&allocInfo2,
-		_cubemapRenderUnit.prevDepthDescriptorSets.data()));
+		unit.prevDepthDescriptorSets.data()));
 
 	// ------------------------------------------------------------
 	// Allocate command buffers (one per face)
@@ -450,11 +472,12 @@ CubemapRenderUnit CubemapRenderInstance::CreateCubemapRenderUnit() const
 
 void CubemapRenderInstance::UpdatePrevDepthDescriptorSet(
 	uint32_t targetIndex,
-	const CubemapRenderTarget& target)
+	const CubemapRenderTarget& target,
+	uint32_t sampledDepthLayer)
 {
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.sampler = _depthSampler; // or whichever sampler you created for render peeling
-	imageInfo.imageView = target.prevDepth.view;
+	imageInfo.imageView = target.depthLayers[sampledDepthLayer].view;
 	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkWriteDescriptorSet write{};
@@ -543,9 +566,11 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		sizeof(ubo));
 
 	// For peeled passes, bind sampled previous depth
+	target.activeRenderDepthLayer = static_cast<uint32_t>(numPass % 2);
+
 	if (numPass > 1)
 	{
-		UpdatePrevDepthDescriptorSet(targetIndex, target);
+		UpdatePrevDepthDescriptorSet(targetIndex, target, (numPass + 1) % 2);
 	}
 
 	for (uint32_t face = 0; face < 6; ++face)
@@ -577,7 +602,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		VkRenderPassBeginInfo rpInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 			.renderPass = renderPass,
-			.framebuffer = target.framebuffers[face],
+			.framebuffer = target.framebuffers[numPass % 2][face],
 			.renderArea = {{0, 0}, {_cubemapSize, _cubemapSize}},
 			.clearValueCount = 2,
 			.pClearValues = clearValues
@@ -811,7 +836,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		LOG_DEBUG("Total time={:.6f} ms", waitSeconds * 1000.0);
 
 		// ============================================================
-		// Phase 1.5: Copy renderDepth -> prevDepth for next sampling
+		// Phase 1.5: Ping-pong depth layers for next sampling
 		// ============================================================
 		uint64_t depthCopyDone = renderDone;
 		if (hit < hitCount) // only needed if another peeled pass will follow
@@ -819,12 +844,14 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 			depthCopyDone = ++timelineValue;
 			waitTemp = std::chrono::high_resolution_clock::now();
 
-			RecordAndSubmitDepthCopyTransitions(
+			RecordAndSubmitDepthPingPongTransitions(
 				cubemapCount,
 				timeline,
 				renderDone,
 				timeline,
-				depthCopyDone
+				depthCopyDone,
+				(hit + 1) % 2,
+				hit % 2
 			);
 
 			LOG_DEBUG("Depth copy/transition submitted");
@@ -895,12 +922,14 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	weights = computeStage->Readback();
 }
 
-void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
+void CubemapRenderInstance::RecordAndSubmitDepthPingPongTransitions(
 	uint32_t cubemapCount,
 	VkSemaphore waitSemaphore,
 	uint64_t waitValue,
 	VkSemaphore signalSemaphore,
-	uint64_t signalValue)
+	uint64_t signalValue,
+	uint32_t sampledDepthLayer,
+	uint32_t renderDepthLayer)
 {
 	VkQueue graphicsQueue;
 	vkGetDeviceQueue(
@@ -923,7 +952,7 @@ void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
 			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			barrier.image = target.renderDepth.image;
+			barrier.image = target.depthLayers[renderDepthLayer].image;
 			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 			barrier.subresourceRange.baseMipLevel = 0;
 			barrier.subresourceRange.levelCount = 1;
@@ -949,7 +978,7 @@ void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
 			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			barrier.image = target.prevDepth.image;
+			barrier.image = target.depthLayers[sampledDepthLayer].image;
 			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 			barrier.subresourceRange.baseMipLevel = 0;
 			barrier.subresourceRange.levelCount = 1;
@@ -985,9 +1014,9 @@ void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
 
 		vkCmdCopyImage(
 			cmd,
-			target.renderDepth.image,
+			target.depthLayers[renderDepthLayer].image,
 			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			target.prevDepth.image,
+			target.depthLayers[sampledDepthLayer].image,
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1,
 			&region);
@@ -999,7 +1028,7 @@ void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
 			barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			barrier.image = target.prevDepth.image;
+			barrier.image = target.depthLayers[sampledDepthLayer].image;
 			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 			barrier.subresourceRange.baseMipLevel = 0;
 			barrier.subresourceRange.levelCount = 1;
@@ -1028,102 +1057,6 @@ void CubemapRenderInstance::RecordAndSubmitDepthCopyTransitions(
 		signalValue,
 		VK_PIPELINE_STAGE_2_TRANSFER_BIT);
 }
-void CubemapRenderInstance::TransitionDepthForCopy(
-	VkCommandBuffer cmd,
-	VkImage image,
-	VkImageLayout oldLayout,
-	VkImageLayout newLayout)
-{
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = oldLayout;
-	barrier.newLayout = newLayout;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = image;
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 6;
-
-	barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier);
-}
-
-void CubemapRenderInstance::TransitionDepthToShaderRead(
-	VkCommandBuffer cmd,
-	VkImage image,
-	VkImageLayout oldLayout,
-	VkImageLayout newLayout)
-{
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = oldLayout;
-	barrier.newLayout = newLayout;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = image;
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 6;
-
-	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier);
-}
-
-void CubemapRenderInstance::TransitionDepthForReuse(
-	VkCommandBuffer cmd,
-	VkImage image,
-	VkImageLayout oldLayout,
-	VkImageLayout newLayout)
-{
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = oldLayout;
-	barrier.newLayout = newLayout;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = image;
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = 6;
-
-	barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-	vkCmdPipelineBarrier(
-		cmd,
-		VK_PIPELINE_STAGE_TRANSFER_BIT,
-		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		0,
-		0, nullptr,
-		0, nullptr,
-		1, &barrier);
-}
-
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {

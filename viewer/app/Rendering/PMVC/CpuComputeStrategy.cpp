@@ -186,7 +186,7 @@ void CpuComputeStrategy::RecordReadback(
     if (!_offset) {
         vkCmdCopyImageToBuffer(
             cmd,
-            target.renderDepth.image,
+            target.depthLayers[target.activeRenderDepthLayer].image,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             _slots[slot].depthBuffer,
             static_cast<uint32_t>(depthRegions.size()),

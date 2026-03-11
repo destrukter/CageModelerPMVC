@@ -33,13 +33,11 @@ struct CubemapRenderTarget
 	VkImageView    cubemapView;
 	std::array<VkImageView, 6> faceViews;
 
-	// writable depth attachment
-	CubemapDepthLayer renderDepth;
+	// ping-pong depth layers: one sampled, one rendered each peeled pass
+	std::array<CubemapDepthLayer, 2> depthLayers;
 
-	// copied previous layer, sampled in fragment shader
-	CubemapDepthLayer prevDepth;
-	
-	std::array<VkFramebuffer, 6> framebuffers;
+	std::array<std::array<VkFramebuffer, 6>, 2> framebuffers;
+	uint32_t activeRenderDepthLayer = 1;
 };
 
 struct CubemapRenderUnit
@@ -100,6 +98,7 @@ public:
 		PipelineHandle cubemapSecondHitPipelineHandle,
 
 		RenderResourceRef<DescriptorSetLayout> matricesLayout,
+		RenderResourceRef<DescriptorSetLayout> prevDepthLayout,
 
 		MemoryMappedBuffer indexBuffer,
 		MemoryMappedBuffer vertexBuffer
@@ -119,27 +118,18 @@ public:
 
 private:
 	//CubemapManager& _cubemapManager;
-	void TransitionDepthForReuse(
-		VkCommandBuffer cmd,
-		VkImage image,
-		VkImageLayout oldLayout,
-		VkImageLayout newLayout);
-	void TransitionDepthToShaderRead(
-		VkCommandBuffer cmd,
-		VkImage image,
-		VkImageLayout oldLayout,
-		VkImageLayout newLayout);
-	void TransitionDepthForCopy(
-		VkCommandBuffer cmd,
-		VkImage image,
-		VkImageLayout oldLayout,
-		VkImageLayout newLayout);
-	void RecordAndSubmitDepthCopyTransitions(
+	void RecordAndSubmitDepthPingPongTransitions(
 		uint32_t cubemapCount,
 		VkSemaphore waitSemaphore,
 		uint64_t waitValue,
 		VkSemaphore signalSemaphore,
-		uint64_t signalValue);
+		uint64_t signalValue,
+		uint32_t sampledDepthLayer,
+		uint32_t renderDepthLayer);
+	void UpdatePrevDepthDescriptorSet(
+		uint32_t targetIndex,
+		const CubemapRenderTarget& target,
+		uint32_t sampledDepthLayer);
 
 
 	std::unique_ptr<ICubemapComputeStrategy> _computeStage;
@@ -195,6 +185,8 @@ private:
 	PipelineHandle _cubemapPipelineHandleCpu;
 	PipelineHandle _cubemapSecondHitPipelineHandle;
 	RenderResourceRef<DescriptorSetLayout>  _matricesLayout;
+	RenderResourceRef<DescriptorSetLayout> _prevDepthLayout;
+	VkSampler _depthSampler = VK_NULL_HANDLE;
 	MemoryMappedBuffer _indexBuffer;
 	MemoryMappedBuffer _vertexBuffer;
 };

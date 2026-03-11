@@ -534,7 +534,7 @@ void GpuAtomicComputeStrategy::UpdateComputeDescriptorSet(uint32_t slotIndex, co
 
 	VkDescriptorImageInfo depthImageInfo{};
 	depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthImageInfo.imageView = target.renderDepth.view;
+	depthImageInfo.imageView = target.depthLayers[target.activeRenderDepthLayer].view;
 	depthImageInfo.sampler = _depthSampler;
 
 	VkDescriptorBufferInfo lambdaInfo{
@@ -592,7 +592,7 @@ void GpuAtomicComputeStrategy::CreateSampler() {
 	samplerInfo.maxLod = 0.0f;
 	samplerInfo.mipLodBias = 0.0f;
 
-	// Clamp (doesn’t really matter since texelFetch ignores addressing)
+	// Clamp (doesnt really matter since texelFetch ignores addressing)
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
