@@ -478,6 +478,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		_cubemapSecondHitPipelineHandle,
 
 		_matricesLayout,
+		_prevDepthLayout,
 
 		_indexBuffer,
 		_vertexBuffer
