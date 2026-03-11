@@ -15,6 +15,7 @@
 #include <Rendering/PMVC/GpuSerialComputeStrategy.h>
 #include <Rendering/PMVC/GpuMassivelyParallelComputeStrategy.h>
 #include <Mesh/Operations/MeshWeightsParams.h>
+#include <chrono>
 
 CubemapRenderInstance::~CubemapRenderInstance() {
 	Cleanup();
@@ -766,6 +767,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const CubemapWorkRange& range,
 	Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	auto waitStart = std::chrono::high_resolution_clock::now();
 	auto waitTemp = std::chrono::high_resolution_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
@@ -815,6 +817,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		"Total time={:.6f} ms",
 		waitSeconds * 1000.0);
 
+	const auto renderStart = std::chrono::steady_clock::now();
 	waitTemp = std::chrono::high_resolution_clock::now();
 	for (uint32_t i = 0; i < cubemapCount; ++i)
 	{
@@ -832,6 +835,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		);
 	}
 	LOG_DEBUG("Cubemap Renders submitted");
+	const auto renderEnd = std::chrono::steady_clock::now();
+	_renderMs = std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
 	waitSeconds = SecondsSince(waitTemp);
 	LOG_DEBUG(
 		"Total time={:.6f} ms",
@@ -839,6 +844,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	// ============================================================
 	// Phase 2: Record ALL compute command buffers
 	// ============================================================
+	const auto computeStart = std::chrono::steady_clock::now();
 	waitTemp = std::chrono::high_resolution_clock::now();
 	for (uint32_t i = 0; i < cubemapCount; ++i)
 	{
@@ -913,6 +919,10 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 		"Total time={:.6f} ms",
 		waitSeconds * 1000.0);
 	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched): done");
+	const auto computeEnd = std::chrono::steady_clock::now();
+	_computeMs = std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 	waitSeconds = SecondsSince(waitStart);
 	LOG_DEBUG(
 		"Total time={:.6f} ms",
@@ -922,6 +932,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -1080,6 +1091,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	// Readback (now guaranteed complete)
 	// ------------------------------------------------------------
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): done");
 }
@@ -1087,6 +1100,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -1183,6 +1197,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 		);
 	}
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: done");
 }
@@ -1190,6 +1206,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 void CubemapRenderInstance::ComputeCoordinatesCpu(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("Start cpu");
 	auto* computeStage = static_cast<CpuComputeStrategy*>(_computeStage.get());
 	const auto vertices = BuildDeformableVertexPositions();
@@ -1213,6 +1230,7 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
 	}
 	LOG_DEBUG("Start render");
+	const auto renderStart = std::chrono::steady_clock::now();
 	uint64_t renderDone = timelineValue;
 	for (uint32_t i = 0; i < cubemapCount; ++i)
 	{
@@ -1247,13 +1265,23 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	wait.pValues = &readbackDone;
 	VK_CHECK(vkWaitSemaphores(_device, &wait, UINT64_MAX));
 	timelineValue = readbackDone;
+	const auto renderEnd = std::chrono::steady_clock::now();
+	_renderMs = std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
 	LOG_DEBUG("Compute start");
+	const auto computeStart = std::chrono::steady_clock::now();
 	computeStage->ConsumeAllSlots();
 	weights = computeStage->Readback();
+	const auto computeEnd = std::chrono::steady_clock::now();
+	_computeMs = std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 }
 
 void CubemapRenderInstance::ComputeCoordinates(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights) {
+	_renderMs.reset();
+	_computeMs.reset();
+	_computeTotalMs.reset();
 	if (_computeType == PMVCComputeType::Serial) {
 		ComputeCoordinatesGPUSerial(range, weights);
 	}
