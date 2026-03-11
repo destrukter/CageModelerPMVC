@@ -1954,6 +1954,7 @@ void Editor::ExportInfluenceColorMap(std::filesystem::path filepath,
 	std::optional<std::vector<int32_t>> selectedVertices) const
 {
 	CheckFormat(!_isComputingWeightsData.load(std::memory_order_relaxed), "The weights and the deformation mesh haven't been computed yet to export.");
+	CheckFormat(_projectData->_parametrization.has_value(), "Cannot export influence map without parametrization data.");
 
 	auto weights = *_weightsData.LockRead();
 
@@ -1963,7 +1964,7 @@ void Editor::ExportInfluenceColorMap(std::filesystem::path filepath,
 		_projectData->_somiglianaDeformer,
 		_projectData->_mesh,
 		_projectData->_cage,
-		_projectData->_parametrization.value(),
+		*_projectData->_parametrization,
 		std::move(selectedVertices),
 		std::move(filepath),
 		std::move(weights),
@@ -2149,6 +2150,13 @@ void Editor::UpdateMeshVertexColors(const bool shouldRenderInfluenceMap) const
 	{
 		CheckFormat(!_isComputingWeightsData.load(std::memory_order_relaxed), "The weights and the deformation mesh haven't been computed yet to export.");
 
+		if (!_projectData->_parametrization.has_value())
+		{
+			LOG_WARN("Skipping influence map color rendering because parametrization data is missing.");
+			deformedMesh->SetColors(std::vector<glm::vec3>(deformedMesh->GetNumVertices(), glm::vec3(0.0f)), false);
+			return;
+		}
+
 		auto weights = *_weightsData.LockRead();
 
 		const auto vertexColorsResult = _meshOperationSystem->ExecuteOperation<MeshComputeInfluenceMapOperation>(
@@ -2156,7 +2164,7 @@ void Editor::UpdateMeshVertexColors(const bool shouldRenderInfluenceMap) const
 			_projectData->_LBCWeightingScheme,
 			_projectData->_somiglianaDeformer,
 			_projectData->_mesh._vertices,
-			_projectData->_parametrization.value(),
+			*_projectData->_parametrization,
 			std::move(weights),
 			_projectData->_modelVerticesOffset,
 			_projectData->CanInterpolateWeights());
