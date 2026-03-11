@@ -11,6 +11,12 @@
 #include <Rendering//PMVC/CubemapRenderInstance.h>
 #include <Rendering/PMVC/Raytracer.h>
 
+#include <future>
+#include <optional>
+#include <vector>
+#include <cstdint>
+#include <mutex>
+
 class ProjectSettingsPanel;
 class ProjectOptionsPanel;
 class ThreadPool;
@@ -47,6 +53,8 @@ public:
 private:
 	void SetUpUIElements();
 
+	void StartEvaluation();
+
 	void CreateSceneLights() const;
 
 	/**
@@ -57,7 +65,7 @@ private:
 	/**
 	 * Invoked when a new project has been created from the window.
 	 */
-	void OnNewProjectCreated();
+	void OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& completionPromise = nullptr);
 
 	/**
 	 * Invoked when the project settings have been changed and new ones have been applied.
@@ -104,7 +112,8 @@ private:
 	 * Exports the influence color map as an .OBJ file.
 	 * @param filepath A filepath for the output .OBJ file.
 	 */
-	void ExportInfluenceColorMap(std::filesystem::path filepath) const;
+	void ExportInfluenceColorMap(std::filesystem::path filepath,
+		std::optional<std::vector<int32_t>> selectedVertices = std::nullopt) const;
 
 	/**
 	 * Exports the weights as a .DMAT file.
@@ -131,6 +140,7 @@ private:
 		EigenMesh cage,
 		EigenMesh deformedCage,
 		const DeformationType deformationType,
+		const bool pmvcUseOffset,
 		const LBC::DataSetup::WeightingScheme weightingScheme,
 		const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
 		const int32_t modelVerticesOffset,
@@ -212,6 +222,21 @@ private:
 	void OnSequencerEndedDragging();
 
 private:
+	struct EvaluationStageTimings
+	{
+		std::optional<double> _initMs;
+		std::optional<double> _renderMs;
+		std::optional<double> _computeMs;
+		std::optional<double> _computeTotalMs;
+		std::optional<double> _deformationApplyMs;
+	};
+
+	void ClearEvaluationData();
+	bool _isEvaluationMode = false;
+	std::atomic<bool> _projectCreationFailed = false;
+	mutable std::mutex _evaluationTimingsMutex;
+	EvaluationStageTimings _latestEvaluationStageTimings;
+
 	/// A pointer to the input system to get input information.
 	SubsystemPtr<InputSubsystem> _inputSubsystem = nullptr;
 

@@ -12,6 +12,7 @@ struct ProjectModelData
 	{
 		_deformationType = other._deformationType;
 		_LBCWeightingScheme = other._LBCWeightingScheme;
+		_pmvcComputeType = other._pmvcComputeType;
 		_numBBWSteps = other._numBBWSteps;
 		_numSamples = other._numSamples;
 		_meshFilepath = other._meshFilepath;
@@ -26,7 +27,9 @@ struct ProjectModelData
 		_interpolateWeights = other._interpolateWeights;
 		_findOffset = other._findOffset;
 		_noOffset = other._noOffset;
+		_pmvcUseOffset = other._pmvcUseOffset;
 		_renderInfluenceMap = other._renderInfluenceMap;
+		_cubemapSize = other._cubemapSize;
 	}
 
 	ProjectModelData(ProjectModelData&& other) noexcept
@@ -56,6 +59,7 @@ struct ProjectModelData
 
 		swap(lhs._deformationType, rhs._deformationType);
 		swap(lhs._LBCWeightingScheme, rhs._LBCWeightingScheme);
+		swap(lhs._pmvcComputeType, rhs._pmvcComputeType);
 		swap(lhs._numBBWSteps, rhs._numBBWSteps);
 		swap(lhs._numSamples, rhs._numSamples);
 		swap(lhs._meshFilepath, rhs._meshFilepath);
@@ -70,7 +74,9 @@ struct ProjectModelData
 		swap(lhs._interpolateWeights, rhs._interpolateWeights);
 		swap(lhs._findOffset, rhs._findOffset);
 		swap(lhs._noOffset, rhs._noOffset);
+		swap(lhs._pmvcUseOffset, rhs._pmvcUseOffset);
 		swap(lhs._renderInfluenceMap, rhs._renderInfluenceMap);
+		swap(lhs._cubemapSize, rhs._cubemapSize);
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -97,6 +103,7 @@ struct ProjectModelData
 	{
 		return lhs._deformationType == rhs._deformationType &&
 			lhs._LBCWeightingScheme == rhs._LBCWeightingScheme &&
+			lhs._pmvcComputeType == rhs._pmvcComputeType &&
 			lhs._numBBWSteps == rhs._numBBWSteps &&
 			lhs._numSamples == rhs._numSamples &&
 			lhs._meshFilepath == rhs._meshFilepath &&
@@ -111,6 +118,8 @@ struct ProjectModelData
 			lhs._interpolateWeights == rhs._interpolateWeights &&
 			lhs._findOffset == rhs._findOffset &&
 			lhs._noOffset == rhs._noOffset;
+		lhs._pmvcUseOffset == rhs._pmvcUseOffset;
+		lhs._cubemapSize == rhs._cubemapSize;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -144,6 +153,7 @@ struct ProjectModelData
 	}
 
 	DeformationType _deformationType = DeformationType::Green;
+	PMVCComputeType _pmvcComputeType = PMVCComputeType::All;
 	LBC::DataSetup::WeightingScheme _LBCWeightingScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 
 	int32_t _numBBWSteps = 300;
@@ -156,6 +166,8 @@ struct ProjectModelData
 	std::optional<std::filesystem::path> _deformedCageFilepath;
 	std::optional<std::filesystem::path> _parametersFilepath;
 
+	uint64_t _cubemapSize = 32;
+
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;
 
 	double _somigNu = 0;
@@ -166,6 +178,7 @@ struct ProjectModelData
 	bool _interpolateWeights = false;
 	bool _findOffset = false;
 	bool _noOffset = false;
+	bool _pmvcUseOffset = false;
 
 	/// Render the influence of the mesh as vertex colors.
 	bool _renderInfluenceMap = false;

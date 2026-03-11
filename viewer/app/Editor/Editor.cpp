@@ -17,7 +17,17 @@
 #include <UI/ProjectOptionsPanel.h>
 #include <UI/ProjectSettingsPanel.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <thread>
 #include <filesystem>
+#include <fstream>
+#include <unordered_map>
+#include <vector>
+#include <future>
+
+#include <regex>
 
 namespace
 {
@@ -78,6 +88,291 @@ namespace
 	{
 		return IsSet(modifierKeys, SDL_KMOD_LSHIFT) || IsSet(modifierKeys, SDL_KMOD_LALT) || IsSet(modifierKeys, SDL_KMOD_LGUI);
 	}
+
+	[[nodiscard]] std::string ToLower(std::string value)
+	{
+		std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return value;
+	}
+
+	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value);
+	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value);
+	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key);
+
+	[[nodiscard]] std::string EscapeJsonString(const std::string& value)
+	{
+		std::string escaped;
+		escaped.reserve(value.size());
+		for (const char c : value)
+		{
+			switch (c)
+			{
+			case '\\': escaped += "\\\\"; break;
+			case '"': escaped += '\\'; escaped += '"'; break;
+			case '\n': escaped += "\\n"; break;
+			case '\r': escaped += "\\r"; break;
+			case '\t': escaped += "\\t"; break;
+			default: escaped += c; break;
+			}
+		}
+		return escaped;
+	}
+
+	struct EvaluationProjectConfig
+	{
+		std::string _name;
+		std::string _coordinateType = "MVC";
+		std::string _pmvcComputeType = "All";
+		std::optional<bool> _pmvcUseOffset;
+		std::string _mesh;
+		std::string _cage;
+		std::string _deformedCage;
+		std::optional<std::string> _embedding;
+		std::optional<int32_t> _samples;
+		std::optional<int32_t> _cubemapSize;
+		std::optional<std::vector<int32_t>> _vertices;
+	};
+
+	struct EvaluationConfig
+	{
+		std::string _timingsFile = "timings.json";
+		std::vector<EvaluationProjectConfig> _projects;
+	};
+
+	[[nodiscard]] std::optional<std::string> ExtractJsonStringValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return match[1].str();
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\s*:\s*(true|false)");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return match[1].str() == "true";
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::optional<int32_t> ExtractJsonIntValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?[0-9]+)");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return static_cast<int32_t>(std::stoi(match[1].str()));
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::optional<std::vector<int32_t>> ExtractJsonIntArrayValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\\s*:\\s*\\[([^\\]]*)\\]");
+		std::smatch match;
+		if (!std::regex_search(objectText, match, pattern) || match.size() <= 1)
+		{
+			return std::nullopt;
+		}
+
+		std::vector<int32_t> values;
+		const auto content = match[1].str();
+		const std::regex intPattern("-?[0-9]+");
+		auto begin = std::sregex_iterator(content.begin(), content.end(), intPattern);
+		auto end = std::sregex_iterator();
+		for (auto it = begin; it != end; ++it)
+		{
+			values.push_back(static_cast<int32_t>(std::stoi(it->str())));
+		}
+
+		return values;
+	}
+
+	[[nodiscard]] std::vector<std::string> ExtractTopLevelObjects(const std::string& arrayText)
+	{
+		std::vector<std::string> objects;
+		int32_t braceDepth = 0;
+		bool isInString = false;
+		std::size_t objectStart = std::string::npos;
+		for (std::size_t i = 0; i < arrayText.size(); ++i)
+		{
+			const auto c = arrayText[i];
+			const auto escaped = (i > 0 && arrayText[i - 1] == '\\');
+			if (c == '"' && !escaped)
+			{
+				isInString = !isInString;
+				continue;
+			}
+			if (isInString)
+			{
+				continue;
+			}
+			if (c == '{')
+			{
+				if (braceDepth == 0)
+				{
+					objectStart = i;
+				}
+				++braceDepth;
+			}
+			else if (c == '}')
+			{
+				--braceDepth;
+				if (braceDepth == 0 && objectStart != std::string::npos)
+				{
+					objects.push_back(arrayText.substr(objectStart, i - objectStart + 1));
+					objectStart = std::string::npos;
+				}
+			}
+		}
+		return objects;
+	}
+
+	[[nodiscard]] std::optional<EvaluationConfig> ParseEvaluationConfig(const std::string& text)
+	{
+		EvaluationConfig config;
+		if (const auto timingsFile = ExtractJsonStringValue(text, "timingsFile"))
+		{
+			config._timingsFile = timingsFile.value();
+		}
+		const auto projectsPos = text.find("\"projects\"");
+		if (projectsPos == std::string::npos)
+		{
+			return std::nullopt;
+		}
+		const auto arrayStart = text.find('[', projectsPos);
+		if (arrayStart == std::string::npos)
+		{
+			return std::nullopt;
+		}
+		int32_t bracketDepth = 0;
+		bool isInString = false;
+		std::size_t arrayEnd = std::string::npos;
+		for (std::size_t i = arrayStart; i < text.size(); ++i)
+		{
+			const auto c = text[i];
+			const auto escaped = (i > 0 && text[i - 1] == '\\');
+			if (c == '"' && !escaped)
+			{
+				isInString = !isInString;
+				continue;
+			}
+			if (isInString)
+			{
+				continue;
+			}
+			if (c == '[')
+			{
+				++bracketDepth;
+			}
+			else if (c == ']')
+			{
+				--bracketDepth;
+				if (bracketDepth == 0)
+				{
+					arrayEnd = i;
+					break;
+				}
+			}
+		}
+		if (arrayEnd == std::string::npos)
+		{
+			return std::nullopt;
+		}
+		const auto projectsText = text.substr(arrayStart + 1, arrayEnd - arrayStart - 1);
+		for (const auto& objectText : ExtractTopLevelObjects(projectsText))
+		{
+			EvaluationProjectConfig project;
+			project._name = ExtractJsonStringValue(objectText, "name").value_or("");
+			project._coordinateType = ExtractJsonStringValue(objectText, "coordinateType").value_or("MVC");
+			project._pmvcComputeType = ExtractJsonStringValue(objectText, "pmvcComputeType").value_or("All");
+			project._pmvcUseOffset = ExtractJsonBoolValue(objectText, "pmvcUseOffset").value_or(false);
+			project._mesh = ExtractJsonStringValue(objectText, "mesh").value_or("");
+			project._cage = ExtractJsonStringValue(objectText, "cage").value_or("");
+			project._deformedCage = ExtractJsonStringValue(objectText, "deformedCage").value_or("");
+			project._embedding = ExtractJsonStringValue(objectText, "embedding");
+			project._samples = ExtractJsonIntValue(objectText, "samples");
+			project._cubemapSize = ExtractJsonIntValue(objectText, "cubemapSize");
+			project._vertices = ExtractJsonIntArrayValue(objectText, "vertices");
+			config._projects.push_back(std::move(project));
+		}
+		return config;
+	}
+
+	[[nodiscard]] bool ValidateEvaluationProjectConfig(const EvaluationProjectConfig& project, const std::size_t projectIndex)
+	{
+		if (project._mesh.empty() || project._cage.empty() || project._deformedCage.empty())
+		{
+			LOG_WARN("Skipping project {} due to missing required file keys (mesh/cage/deformedCage).", projectIndex);
+			return false;
+		}
+
+		if (const auto deformationType = ParseDeformationType(project._coordinateType); !deformationType.has_value())
+		{
+			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", projectIndex, project._coordinateType);
+			return false;
+		}
+		else if (*deformationType == DeformationType::PMVC && !ParsePMVCComputeType(project._pmvcComputeType).has_value())
+		{
+			LOG_WARN("Skipping project {} due to unsupported pmvcComputeType '{}'.", projectIndex, project._pmvcComputeType);
+			return false;
+		}
+
+		if (project._cubemapSize.has_value() && project._cubemapSize.value() <= 0)
+		{
+			LOG_WARN("Skipping project {} due to invalid cubemapSize {} (must be > 0).", projectIndex, project._cubemapSize.value());
+			return false;
+		}
+
+		return true;
+	}
+
+	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value)
+	{
+		static const std::unordered_map<std::string, DeformationType> mapping = {
+			{ "mvc", DeformationType::MVC },
+			{ "qmvc", DeformationType::QMVC },
+			{ "harmonic", DeformationType::Harmonic },
+			{ "bbw", DeformationType::BBW },
+			{ "lbc", DeformationType::LBC },
+			{ "mec", DeformationType::MEC },
+			{ "mlc", DeformationType::MLC },
+			{ "green", DeformationType::Green },
+			{ "qgc", DeformationType::QGC },
+			{ "somigliana", DeformationType::Somigliana },
+			{ "pmvc", DeformationType::PMVC },
+			{ "raytracing", DeformationType::Raytracing }
+		};
+
+		const auto it = mapping.find(ToLower(value));
+		if (it == mapping.end())
+		{
+			return std::nullopt;
+		}
+
+		return it->second;
+	}
+	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value)
+	{
+		static const std::unordered_map<std::string, PMVCComputeType> mapping = {
+			{ "serial", PMVCComputeType::Serial },
+			{ "ring", PMVCComputeType::Ring },
+			{ "all", PMVCComputeType::All },
+			{ "cpu", PMVCComputeType::Cpu }
+		};
+		const auto it = mapping.find(ToLower(value));
+		if (it == mapping.end())
+		{
+			return std::nullopt;
+		}
+		return it->second;
+	}
 }
 
 Editor::Editor(const SubsystemPtr<InputSubsystem>& inputSubsystem,
@@ -133,7 +428,9 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCancelled(); },
 		[this] { OnNewProjectCreated(); });
 
-	_projectModel->_deformationType = DeformationType::MVC;
+	_projectModel->_deformationType = DeformationType::PMVC;
+	_projectModel->_pmvcComputeType = PMVCComputeType::All;
+	_projectModel->_pmvcUseOffset = false;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
 	_projectModel->_meshFilepath = "assets/meshes/armadilloman.obj";
@@ -143,8 +440,284 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 	_newProjectPanel->SetModel(_projectModel);
 	_projectOptionsPanel->SetModelData(_projectModel);
 
-	OnNewProjectCreated();
+	StartEvaluation();
+	//OnNewProjectCreated();
 //#endif
+}
+
+void Editor::StartEvaluation()
+{
+	const auto kEvaluationRoot = std::filesystem::path("evaluation");
+	constexpr auto kEvaluationConfig = "projects.json";
+
+	const auto evaluationRoot = std::filesystem::absolute(kEvaluationRoot);
+	const auto configPath = evaluationRoot / kEvaluationConfig;
+	if (!std::filesystem::exists(configPath))
+	{
+		LOG_WARN("Evaluation config '{}' does not exist. Skipping evaluation run.", configPath.string());
+		return;
+	}
+
+	std::ifstream configFile(configPath);
+	if (!configFile.is_open())
+	{
+		LOG_ERROR("Unable to open evaluation config '{}'.", configPath.string());
+		return;
+	}
+
+	const std::string configContent((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
+	const auto parsedConfig = ParseEvaluationConfig(configContent);
+
+	const auto timingOutputPath = evaluationRoot / parsedConfig->_timingsFile;
+
+#ifdef NDEBUG
+	constexpr auto buildType = "Release";
+#else
+	constexpr auto buildType = "Debug/Development";
+#endif
+
+	struct EvaluationResult
+	{
+		std::string _projectName;
+		std::string _coordinateType;
+		std::string _status;
+		std::optional<double> _elapsedMs;
+		std::optional<double> _initMs;
+		std::optional<double> _renderMs;
+		std::optional<double> _computeMs;
+		std::optional<double> _computeTotalMs;
+		std::optional<double> _deformationApplyMs;
+		std::optional<int32_t> _meshVertexCount;
+		std::optional<int32_t> _cageVertexCount;
+		std::optional<std::string> _pmvcComputeType;
+		std::optional<bool> _pmvcUseOffset;
+		std::optional<int32_t> _cubemapSize;
+	};
+
+	std::vector<EvaluationResult> results;
+	results.reserve(parsedConfig->_projects.size());
+
+	
+	_isEvaluationMode = true;
+
+	for (std::size_t i = 0; i < parsedConfig->_projects.size(); ++i)
+	{
+		const auto& project = parsedConfig->_projects[i];
+		if (!ValidateEvaluationProjectConfig(project, i))
+		{
+			//LOG_ERROR("Failed to parse evaluation config '{}'.", configPath.string());
+			return;
+		}
+		if (project._mesh.empty() || project._cage.empty() || project._deformedCage.empty())
+		{
+			LOG_WARN("Skipping project {} due to missing required file keys (mesh/cage/deformedCage).", i);
+			continue;
+		}
+
+		const auto deformationType = ParseDeformationType(project._coordinateType);
+		if (!deformationType.has_value())
+		{
+			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", i, project._coordinateType);
+			continue;
+		}
+
+		const auto projectName = project._name.empty() ? (std::string("project_") + std::to_string(i)) : project._name;
+		const auto projectOutputDir = evaluationRoot / projectName;
+		std::filesystem::create_directories(projectOutputDir);
+
+		_projectModel->_deformationType = *deformationType;
+		_projectModel->_pmvcComputeType = ParsePMVCComputeType(project._pmvcComputeType).value_or(PMVCComputeType::All);
+		_projectModel->_pmvcUseOffset = project._pmvcUseOffset.value_or(false);
+		_projectModel->_meshFilepath = evaluationRoot / project._mesh;
+		_projectModel->_cageFilepath = evaluationRoot / project._cage;
+		_projectModel->_deformedCageFilepath = evaluationRoot / project._deformedCage;
+		_projectModel->_cubemapSize = project._cubemapSize.value_or(32);
+
+		const auto start = std::chrono::steady_clock::now();
+
+		_projectCreationFailed.store(false, std::memory_order_seq_cst);
+		{
+			std::scoped_lock lock(_evaluationTimingsMutex);
+			_latestEvaluationStageTimings = {};
+		}
+
+		auto completionPromise = std::make_shared<std::promise<void>>();
+		auto completionFuture = completionPromise->get_future();
+
+		OnNewProjectCreated(completionPromise);
+
+		while (completionFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+		{
+			if (_projectCreationFailed.load(std::memory_order_seq_cst))
+			{
+				break;
+			}
+
+			FunctionWrapper mainThreadFunction;
+			while (_mainThreadQueue->TryPop(mainThreadFunction))
+			{
+				mainThreadFunction();
+			}
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+
+		FunctionWrapper mainThreadFunction;
+		while (_mainThreadQueue->TryPop(mainThreadFunction))
+		{
+			mainThreadFunction();
+		}
+
+		if (_projectCreationFailed.load(std::memory_order_seq_cst))
+		{
+			LOG_WARN("Evaluation project '{}' failed.", projectName);
+
+			results.push_back(EvaluationResult{
+				projectName,
+				project._coordinateType,
+				"FAILED",
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				std::nullopt,
+				(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+				(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
+				(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt });
+			continue;
+		}
+
+		const auto end = std::chrono::steady_clock::now();
+		const auto elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+		EvaluationStageTimings stageTimings;
+		{
+			std::scoped_lock lock(_evaluationTimingsMutex);
+			stageTimings = _latestEvaluationStageTimings;
+		}
+
+		ExportWeights(projectOutputDir / "weights.dmat");
+		ExportDeformedCage(projectOutputDir / "deformed_cage.obj");
+		ExportDeformedMeshes(projectOutputDir / "deformed_mesh.obj");
+		if (project._vertices.has_value())
+		{
+			ExportInfluenceColorMap(projectOutputDir / "influence_map.obj", project._vertices);
+
+			std::ofstream selectedVerticesOutput(projectOutputDir / "influence_map_vertices.txt", std::ios::out | std::ios::trunc);
+			if (!selectedVerticesOutput.is_open())
+			{
+				LOG_WARN("Unable to write influence map vertices file for project '{}'.", projectName);
+			}
+			else
+			{
+				for (const auto vertexIdx : project._vertices.value())
+				{
+					selectedVerticesOutput << vertexIdx << "\n";
+				}
+			}
+		}
+		const auto meshVertexCount = _projectData
+			? std::optional<int32_t>(static_cast<int32_t>(_projectData->_mesh._vertices.rows()))
+			: std::nullopt;
+		const auto cageVertexCount = _projectData
+			? std::optional<int32_t>(static_cast<int32_t>(_projectData->_cage._vertices.rows()))
+			: std::nullopt;
+		//_cubemapRenderer->Cleanup();
+		ClearEvaluationData();
+		
+		//_cubemapRenderer->~CubemapManager();
+		//_cubemapRenderer = std::make_shared<CubemapManager>(_sceneManager->_renderPipelineManager, _renderResourceManager, _device, _instance, 32, VK_FORMAT_R32G32B32A32_SFLOAT);
+		
+
+		//timingOutput << projectName << "," << project._coordinateType << "," << elapsedMs <<  ",cubemapSize: " << project._cubemapSize.value_or(32) <<'\n';
+		results.push_back(EvaluationResult{
+			projectName,
+			project._coordinateType,
+			"OK",
+			elapsedMs,
+			stageTimings._initMs,
+			stageTimings._renderMs,
+			stageTimings._computeMs,
+			stageTimings._computeTotalMs,
+			stageTimings._deformationApplyMs,
+						meshVertexCount,
+			cageVertexCount,
+			(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
+			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt });
+		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
+	}
+
+	_isEvaluationMode = false;
+	std::ofstream timingOutput(timingOutputPath, std::ios::out | std::ios::trunc);
+	if (!timingOutput.is_open())
+	{
+		LOG_ERROR("Unable to open timing output file '{}'.", timingOutputPath.string());
+		return;
+	}
+
+	timingOutput << "{\n";
+	timingOutput << "  \"buildType\": \"" << EscapeJsonString(buildType) << "\",\n";
+	timingOutput << "  \"projectCount\": " << parsedConfig->_projects.size() << ",\n";
+	timingOutput << "  \"results\": [\n";
+	for (std::size_t i = 0; i < results.size(); ++i)
+	{
+		const auto& result = results[i];
+		timingOutput << "    {\n";
+		timingOutput << "      \"projectName\": \"" << EscapeJsonString(result._projectName) << "\",\n";
+		timingOutput << "      \"coordinateType\": \"" << EscapeJsonString(result._coordinateType) << "\",\n";
+		timingOutput << "      \"status\": \"" << EscapeJsonString(result._status) << "\"";
+		if (result._elapsedMs.has_value())
+		{
+			timingOutput << ",\n      \"elapsedMs\": " << result._elapsedMs.value();
+		}
+		if (result._initMs.has_value())
+		{
+			timingOutput << ",\n      \"initMs\": " << result._initMs.value();
+		}
+		if (result._renderMs.has_value())
+		{
+			timingOutput << ",\n      \"renderMs\": " << result._renderMs.value();
+		}
+		if (result._computeMs.has_value())
+		{
+			timingOutput << ",\n      \"computeMs\": " << result._computeMs.value();
+		}
+		if (result._computeTotalMs.has_value())
+		{
+			timingOutput << ",\n      \"computeTotalMs\": " << result._computeTotalMs.value();
+		}
+		if (result._deformationApplyMs.has_value())
+		{
+			timingOutput << ",\n      \"deformationApplyMs\": " << result._deformationApplyMs.value();
+		}
+		if (result._meshVertexCount.has_value())
+		{
+			timingOutput << ",\n      \"numMeshVertices\": " << result._meshVertexCount.value();
+		}
+		if (result._cageVertexCount.has_value())
+		{
+			timingOutput << ",\n      \"numCageVertices\": " << result._cageVertexCount.value();
+		}
+		if (result._pmvcComputeType.has_value())
+		{
+			timingOutput << ",\n      \"pmvcComputeType\": \"" << EscapeJsonString(result._pmvcComputeType.value()) << "\"";
+		}
+		if (result._pmvcUseOffset.has_value())
+		{
+			timingOutput << ",\n      \"pmvcUseOffset\": " << (result._pmvcUseOffset.value() ? "true" : "false");
+		}
+		if (result._cubemapSize.has_value())
+		{
+			timingOutput << ",\n      \"cubemapSize\": " << result._cubemapSize.value();
+		}
+		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
+	}
+	timingOutput << "  ]\n";
+	timingOutput << "}\n";
 }
 
 void Editor::CreateSceneLights() const
@@ -472,128 +1045,169 @@ void Editor::OnProjectSettingsApplied()
 	OnNewProjectCreated();
 }
 
-void Editor::OnNewProjectCreated()
+void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& completionPromise)
 {
 	LOG_DEBUG("Set Cage and Mesh");
+
+	_projectCreationFailed.store(false, std::memory_order_seq_cst);
+
 	if (_projectModel->CheckMissingFiles())
 	{
 		_statusBar->SetError("Unable to load all files, check if some of them are missing.");
-
+		_projectCreationFailed.store(true, std::memory_order_seq_cst);
 		return;
 	}
-	
 
-	_threadPool->Submit([this]()
+	_isComputingWeightsData.store(true, std::memory_order_seq_cst);
+	_isComputingDeformationData.store(false, std::memory_order_seq_cst);
+
+	auto projectModelSnapshot = std::make_shared<ProjectModelData>(*_projectModel);
+	if (_newProjectPanel != nullptr)
 	{
-		_isComputingWeightsData.store(true, std::memory_order_seq_cst);
+		projectModelSnapshot = std::make_shared<ProjectModelData>(*_newProjectPanel->GetModel());
+	}
 
-		// Update _projectModel if user creates a new project
-		if(_newProjectPanel != nullptr) {
-			auto _panelModel = _newProjectPanel->GetModel();
-			_projectModel = std::make_shared<ProjectModelData>(*_panelModel);
-		}
-			
-		auto projectResult = CreateProject();
+	const bool isEvaluationMode = _isEvaluationMode;
+
+	_threadPool->Submit([this, completionPromise, projectModelSnapshot, isEvaluationMode]()
+	{
+		const auto initStart = std::chrono::steady_clock::now();
+		const auto fail = [this]()
+		{
+			_isComputingWeightsData.store(false, std::memory_order_seq_cst);
+			_isComputingDeformationData.store(false, std::memory_order_seq_cst);
+			_projectCreationFailed.store(true, std::memory_order_seq_cst);
+		};
+
+		auto projectResult = _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
+			projectModelSnapshot->_deformationType,
+			projectModelSnapshot->_pmvcComputeType,
+			projectModelSnapshot->_LBCWeightingScheme,
+			projectModelSnapshot->_meshFilepath.value(),
+			projectModelSnapshot->_cageFilepath.value(),
+			projectModelSnapshot->_deformedCageFilepath,
+			projectModelSnapshot->_weightsFilepath,
+			projectModelSnapshot->_embeddingFilepath,
+			projectModelSnapshot->_parametersFilepath,
+			projectModelSnapshot->_numBBWSteps,
+			projectModelSnapshot->_numSamples,
+			projectModelSnapshot->_scalingFactor,
+			projectModelSnapshot->_interpolateWeights,
+			projectModelSnapshot->_findOffset,
+			projectModelSnapshot->_noOffset,
+			projectModelSnapshot->_pmvcUseOffset,
+			projectModelSnapshot->_somigNu,
+			projectModelSnapshot->_somiglianaDeformer);
 
 		if (projectResult.HasError())
 		{
-			// Update the status with an error.
 			_mainThreadQueue->Push([this, error = std::move(projectResult.GetError())]() mutable
 			{
 				_statusBar->SetError(std::move(error));
 			});
 
+			fail();
 			return;
 		}
-		
-		
-		// Compute the weights, but do it off the main thread, because it's the most expensive operation.
-		//LOG_DEBUG(_projectModel.get()->_deformationType);
-		//std::optional<decltype(ComputeCageWeights(*projectResult.GetValue()))> weightsResult;
-		/*std::promise<decltype(ComputeCageWeights(*projectResult.GetValue()))> promise;
-		auto future = promise.get_future();
-		Eigen::MatrixXd weightMatrix;
-		if (_projectModel.get()->_deformationType == DeformationType::PMVCLipman) {
-			_mainThreadQueue->Push(
-				[this, projectResult, p = std::move(promise), &weightMatrix]() mutable {
-				_cubemapRenderer->SetCage(projectResult.GetValue()->_cage);
-				_cubemapRenderer->SetMesh(projectResult.GetValue()->_mesh);
-				_cubemapRenderer->Initialize();
-				//_cubemapRenderer->ComputeCoordinates(weightMatrix);
-				
-				p.set_value(_cubemapRenderer->ComputeCoordinates());
-			}
-			);
-		}
-		else if (_projectModel.get()->_deformationType == DeformationType::PMVCRayracing) {
-			_mainThreadQueue->Push(
-				[this, projectResult, p = std::move(promise), &weightMatrix]() mutable {
-				_raytracer->SetCage(projectResult.GetValue()->_cage);
-				_raytracer->SetMesh(projectResult.GetValue()->_mesh);
-				_raytracer->Initialize();
-				//_cubemapRenderer->ComputeCoordinates(weightMatrix);
 
-				p.set_value(_raytracer->ComputeCoordinates());
-				//projectResult.GetValue()->_deformationType = DeformationType::MVC;
-				//p.set_value(ComputeCageWeights(*projectResult.GetValue()));
-			}
-			);
-		}
-		else {
-			promise.set_value(ComputeCageWeights(*projectResult.GetValue()));
-		}
+		auto projectData = projectResult.GetValue();
+		const auto initEnd = std::chrono::steady_clock::now();
+		const auto initMs = std::chrono::duration<double, std::milli>(initEnd - initStart).count();
 
-		auto weightsResult = future.get();*/
-		using WeightsResult = decltype(ComputeCageWeights(*projectResult.GetValue()));
-
+		using WeightsResult = decltype(ComputeCageWeights(*projectData));
 		std::future<WeightsResult> future;
 
-		if (DeformationTypeHelpers::IsPMVC(_projectModel->_deformationType)) {
-
+		if (DeformationTypeHelpers::IsPMVC(projectModelSnapshot->_deformationType))
+		{
 			auto promise = std::make_shared<std::promise<WeightsResult>>();
 			future = promise->get_future();
-			_mainThreadQueue->Push(
-				[this, projectResult, promise]() mutable {
-				_cubemapRenderer->SetCage(projectResult.GetValue()->_cage);
-				_cubemapRenderer->SetMesh(projectResult.GetValue()->_mesh);
-				_cubemapRenderer->Initialize();
 
-				promise->set_value(_cubemapRenderer->ComputeCoordinates(projectResult.GetValue()->_deformationType));
-			}
-			);
+			_mainThreadQueue->Push([this, projectData, projectModelSnapshot, promise]() mutable
+			{
+				try
+				{
+					_cubemapRenderer->Initialize(static_cast<uint32_t>(projectModelSnapshot->_cubemapSize));
+					_cubemapRenderer->SetCage(projectData->_cage);
+					_cubemapRenderer->SetMesh(projectData->_mesh);
+					promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_pmvcComputeType, projectData->_pmvcUseOffset));
+					//promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_deformationType));
+				}
+				catch (...)
+				{
+					promise->set_exception(std::current_exception());
+				}
+			});
 		}
-		else if (_projectModel->_deformationType == DeformationType::Raytracing) {
+		else if (projectModelSnapshot->_deformationType == DeformationType::Raytracing)
+		{
 			auto promise = std::make_shared<std::promise<WeightsResult>>();
 			future = promise->get_future();
-			_mainThreadQueue->Push(
-				[this, projectResult, promise]() mutable {
-				_raytracer->SetCage(projectResult.GetValue()->_cage);
-				_raytracer->SetMesh(projectResult.GetValue()->_mesh);
-				_raytracer->Initialize();
-				promise->set_value(_raytracer->ComputeCoordinates());
-			}
-			);
 
+			_mainThreadQueue->Push([this, projectData, promise]() mutable
+			{
+				try
+				{
+					_raytracer->SetCage(projectData->_cage);
+					_raytracer->SetMesh(projectData->_mesh);
+					_raytracer->Initialize();
+					promise->set_value(_raytracer->ComputeCoordinates());
+				}
+				catch (...)
+				{
+					promise->set_exception(std::current_exception());
+				}
+			});
 		}
-		else {
+		else
+		{
 			std::promise<WeightsResult> promise;
 			future = promise.get_future();
-			promise.set_value(ComputeCageWeights(*projectResult.GetValue()));
+			promise.set_value(ComputeCageWeights(*projectData));
 		}
 
 		auto weightsResult = future.get();
-		if (weightsResult.HasError() && !DeformationTypeHelpers::IsPMVC(_projectModel.get()->_deformationType))
+		/*try
 		{
-			// Update the status with an error.
+			weightsResult = future.get();
+		}
+		catch (const std::exception& e)
+		{
+			_mainThreadQueue->Push([this, msg = std::string(e.what())]() mutable
+			{
+				_statusBar->SetError(std::move(msg));
+			});
+
+			fail();
+			return;
+		}
+		catch (...)
+		{
+			_mainThreadQueue->Push([this]()
+			{
+				_statusBar->SetError("Unknown error during main-thread weight computation.");
+			});
+
+			fail();
+			return;
+		}*/
+
+		if (weightsResult.HasError())
+		{
 			_mainThreadQueue->Push([this, error = std::move(weightsResult.GetError())]() mutable
 			{
 				_statusBar->SetError(std::move(error));
 			});
 
+			fail();
 			return;
 		}
 
+		_isComputingDeformationData.store(true, std::memory_order_seq_cst);
 		_isComputingWeightsData.store(false, std::memory_order_seq_cst);
+
+		const auto renderMs = weightsResult.GetValue()._renderMs;
+		const auto computeMs = weightsResult.GetValue()._computeMs;
+		const auto computeTotalMs = weightsResult.GetValue()._computeTotalMs;
 
 		_weightsData.Update(std::move(weightsResult.GetValue()._skinningMatrix),
 			std::move(weightsResult.GetValue()._weights),
@@ -602,36 +1216,85 @@ void Editor::OnNewProjectCreated()
 			std::move(weightsResult.GetValue()._psiTri),
 			std::move(weightsResult.GetValue()._psiQuad));
 
-		_isComputingDeformationData.store(true, std::memory_order_seq_cst);
-
-		const auto& mesh = projectResult.GetValue()->_mesh;
-		const auto& cage = projectResult.GetValue()->_cage;
-		const auto& defCage = projectResult.GetValue()->_deformedCage;
+		const auto& mesh = projectData->_mesh;
+		const auto& cage = projectData->_cage;
+		const auto& defCage = projectData->_deformedCage;
 
 		LOG_DEBUG("MESH vertices: {} x {}", mesh._vertices.rows(), mesh._vertices.cols());
 		LOG_DEBUG("CAGE vertices: {} x {}", cage._vertices.rows(), cage._vertices.cols());
 		LOG_DEBUG("DEF CAGE vertices: {} x {}", defCage._vertices.rows(), defCage._vertices.cols());
-		//LOG_DEBUG(projectResult.GetValue()->_deformationType);
 
-		auto deformedMeshResult = ComputeDeformedMesh(projectResult.GetValue()->_mesh,
-			projectResult.GetValue()->_cage,
-			projectResult.GetValue()->_deformedCage,
-			projectResult.GetValue()->_deformationType,
-			projectResult.GetValue()->_LBCWeightingScheme,
-			projectResult.GetValue()->_somiglianaDeformer,
-			projectResult.GetValue()->_modelVerticesOffset,
-			projectResult.GetValue()->_numSamples,
-			projectResult.GetValue()->CanInterpolateWeights());
+		const auto deformationApplyStart = std::chrono::steady_clock::now();
+		auto deformedMeshResult = ComputeDeformedMesh(projectData->_mesh,
+			projectData->_cage,
+			projectData->_deformedCage,
+			projectData->_deformationType,
+			projectData->_pmvcUseOffset,
+			projectData->_LBCWeightingScheme,
+			projectData->_somiglianaDeformer,
+			projectData->_modelVerticesOffset,
+			projectData->_numSamples,
+			projectData->CanInterpolateWeights());
+
+		if (deformedMeshResult.HasError())
+		{
+			_mainThreadQueue->Push([this, error = std::move(deformedMeshResult.GetError())]() mutable
+			{
+				_statusBar->SetError(std::move(error));
+			});
+
+			fail();
+			return;
+		}
+
 		_deformationData.Update(std::move(deformedMeshResult.GetValue()._vertexData));
+		const auto deformationApplyEnd = std::chrono::steady_clock::now();
+		const auto deformationApplyMs = std::chrono::duration<double, std::milli>(deformationApplyEnd - deformationApplyStart).count();
 
-		_isComputingDeformationData.store(false, std::memory_order_seq_cst);
+		if (isEvaluationMode)
+		{
+			// Evaluation/offscreen mode:
+			// keep computed data, skip all scene/render proxy churn.
+			_projectData = projectData;
+			{
+				std::scoped_lock lock(_evaluationTimingsMutex);
+				_latestEvaluationStageTimings._initMs = initMs;
+				_latestEvaluationStageTimings._computeTotalMs = computeTotalMs;
+				if (projectData->_deformationType == DeformationType::PMVC &&
+					(projectData->_pmvcComputeType == PMVCComputeType::All || projectData->_pmvcComputeType == PMVCComputeType::Cpu))
+				{
+					_latestEvaluationStageTimings._renderMs = renderMs;
+					_latestEvaluationStageTimings._computeMs = computeMs;
+				}
+				else
+				{
+					_latestEvaluationStageTimings._renderMs.reset();
+					_latestEvaluationStageTimings._computeMs.reset();
+				}
+				_latestEvaluationStageTimings._deformationApplyMs = deformationApplyMs;
+			}
 
-		_mainThreadQueue->Push([this, projectResultValue = projectResult.GetValue()]() mutable
+			_isComputingDeformationData.store(false, std::memory_order_seq_cst);
+
+			if (completionPromise != nullptr)
+			{
+				try
+				{
+					completionPromise->set_value();
+				}
+				catch (const std::future_error&)
+				{
+				}
+			}
+
+			return;
+		}
+
+		_mainThreadQueue->Push([this, projectData, completionPromise]() mutable
 		{
 			const auto& viewInfo = _cameraSubsystem->GetCamera().GetViewInfo();
 			_gizmo->SetPosition(viewInfo, glm::vec3(0.0f));
 
-			// Remove the old meshes first and then re-add them back to the scene.
 			if (_deformedMeshHandle != InvalidHandle)
 			{
 				_scene->RemoveMesh(_deformedMeshHandle);
@@ -644,76 +1307,100 @@ void Editor::OnNewProjectCreated()
 				_deformedCageHandle = InvalidHandle;
 			}
 
-			_projectData = projectResultValue;
+			_projectData = projectData;
 
 			const auto translation = glm::translate(glm::mat4(1.0f), glm::vec3(_projectData->_centerOffset));
 			const auto scale = glm::scale(glm::mat4(1.0f), glm::vec3(_projectData->_scalingFactor));
 			const auto newModelMatrix = scale * translation;
 
-			// Add the mesh and the cage to the rendered meshes. We are not going to render the original mesh and original cage for now.
 			_deformedMeshHandle = _scene->AddMesh(_projectData->_mesh._vertices, _projectData->_mesh._faces);
-			const auto mesh = _scene->GetMesh(_deformedMeshHandle);
-			mesh->SetModelMatrix(newModelMatrix);
+			const auto deformedMesh = _scene->GetMesh(_deformedMeshHandle);
+			deformedMesh->SetModelMatrix(newModelMatrix);
 
 			_deformedCageHandle = _scene->AddCage(_projectData->_deformedCage._vertices, _projectData->_deformedCage._faces);
-
-			//_cubemapRenderer->SetCage(_projectData->_cage);
-			//_cubemapRenderer->SetMesh(_projectData->_mesh);
-			//_cubemapRenderer->Initialize();
-			//LOG_DEBUG("Cubemaprenderer init fertig");
-			//_cubemapRenderer->ComputeCoordinates();
-
 			const auto cageMesh = _scene->GetMesh(_deformedCageHandle);
 			cageMesh->SetModelMatrix(newModelMatrix);
 
-			// We only recompute the vertex colors if they were previously on.
 			const auto renderInfluenceMap = _projectModel->CanRenderInfluenceMap();
 			if (renderInfluenceMap)
 			{
 				UpdateMeshVertexColors(renderInfluenceMap);
 			}
 
-			// Update the settings panel.
 			_projectOptionsPanel->SetDeformableMesh(_scene->GetMesh(_deformedMeshHandle));
 			_projectOptionsPanel->SetCageMesh(_scene->GetMesh(_deformedCageHandle));
 
-			// Update the mesh and the cage. We do this only once to compute the weights and any other operation is executed simply on the deformed cage.
 			_toolBar->SetModel(std::make_shared<ToolBarModel>(_projectData));
 
-			// Update the status bar to display the new meshes.
 			_statusBar->SetModel(std::make_shared<StatusBarModel>(_projectData,
-				[this]<typename T>(T&& selectionType) { OnSelectionTypeChanged(std::forward<T>(selectionType)); },
+				[this]<typename T>(T && selectionType) { OnSelectionTypeChanged(std::forward<T>(selectionType)); },
 				[this](const uint32_t newFrameIndex) { OnSequencerFrameIndexChanged(newFrameIndex); },
 				[this](const uint32_t frameIndex, const uint32_t numFrames) { OnSequencerNumFramesChanged(frameIndex, numFrames); },
 				[this]() { OnSequencerStartedDragging(); },
 				[this]() { OnSequencerEndedDragging(); }));
 
-			// Updates the vertex data with the last sample.
 			UpdateDeformedMeshPositionsFromDeformationData();
 
-			// Rebuild the entire BVH.
 			{
 				auto bvhBuilder = _scene->BeginGeometryBVH();
 				bvhBuilder.AddGeometry(_deformedMeshHandle);
 				bvhBuilder.AddGeometry(_deformedCageHandle);
 			}
 
-			// Ready to dismiss the project panel when we are done.
 			if (_newProjectPanel != nullptr)
 			{
 				_newProjectPanel->Dismiss();
 				_newProjectPanel = nullptr;
 			}
 
-			// Ready to dismiss the project panel when we are done.
 			if (_projectSettingsPanel != nullptr)
 			{
 				_projectSettingsPanel->Dismiss();
 				_projectSettingsPanel = nullptr;
 			}
 
+			_isComputingDeformationData.store(false, std::memory_order_seq_cst);
+
+			if (completionPromise != nullptr)
+			{
+				try
+				{
+					completionPromise->set_value();
+				}
+				catch (const std::future_error&)
+				{
+				}
+			}
 		});
 	});
+}
+
+void Editor::ClearEvaluationData()
+{
+	/* {
+		auto emptyWeights = MeshComputeWeightsOperationResult{};
+		_weightsData.Update(std::move(emptyWeights._skinningMatrix),
+			std::move(emptyWeights._weights),
+			std::move(emptyWeights._interpolatedWeights),
+			std::move(emptyWeights._psi),
+			std::move(emptyWeights._psiTri),
+			std::move(emptyWeights._psiQuad));
+	}
+
+
+
+	_weightsData.Update(Eigen::MatrixXd(),
+		Eigen::MatrixXd(),
+		Eigen::MatrixXd(),
+		Eigen::MatrixXd(),
+		Eigen::MatrixXd(),
+		Eigen::MatrixXd());
+	*/
+	//_deformationData.Update({});
+
+	_projectData.reset();
+
+
 }
 
 void Editor::OnProjectSettingsCancelled()
@@ -920,6 +1607,7 @@ void Editor::OnMouseClickReleased(const InputActionParams& actionParams)
 			deformedMesh = _scene->GetMesh(_deformedCageHandle)->CopyAsEigen(),
 			somiglianaDeformer = _projectData->_somiglianaDeformer,
 			deformationType = _projectData->_deformationType,
+			pmvcUseOffset = _projectData->_pmvcUseOffset,
 			weightingScheme = _projectData->_LBCWeightingScheme,
 			modelVerticesOffset = _projectData->_modelVerticesOffset,
 			numSamples = _projectData->_numSamples,
@@ -931,6 +1619,7 @@ void Editor::OnMouseClickReleased(const InputActionParams& actionParams)
 				std::move(cage),
 				std::move(deformedMesh),
 				deformationType,
+				pmvcUseOffset,
 				weightingScheme,
 				somiglianaDeformer,
 				modelVerticesOffset,
@@ -1152,6 +1841,7 @@ void Editor::OnSequencerNumFramesChanged(const uint32_t currentFrameIndex, const
 		deformedMesh = _scene->GetMesh(_deformedCageHandle)->CopyAsEigen(),
 		somiglianaDeformer = _projectData->_somiglianaDeformer,
 		deformationType = _projectData->_deformationType,
+		pmvcUseOffset = _projectData->_pmvcUseOffset,
 		weightingScheme = _projectData->_LBCWeightingScheme,
 		modelVerticesOffset = _projectData->_modelVerticesOffset,
 		numSamples = _projectData->_numSamples,
@@ -1164,6 +1854,7 @@ void Editor::OnSequencerNumFramesChanged(const uint32_t currentFrameIndex, const
 			std::move(cage),
 			std::move(deformedMesh),
 			deformationType,
+			pmvcUseOffset,
 			weightingScheme,
 			somiglianaDeformer,
 			modelVerticesOffset,
@@ -1259,7 +1950,8 @@ void Editor::ExportDeformedCage(std::filesystem::path filepath) const
 		std::move(filepath));
 }
 
-void Editor::ExportInfluenceColorMap(std::filesystem::path filepath) const
+void Editor::ExportInfluenceColorMap(std::filesystem::path filepath,
+	std::optional<std::vector<int32_t>> selectedVertices) const
 {
 	CheckFormat(!_isComputingWeightsData.load(std::memory_order_relaxed), "The weights and the deformation mesh haven't been computed yet to export.");
 
@@ -1272,6 +1964,7 @@ void Editor::ExportInfluenceColorMap(std::filesystem::path filepath) const
 		_projectData->_mesh,
 		_projectData->_cage,
 		_projectData->_parametrization.value(),
+		std::move(selectedVertices),
 		std::move(filepath),
 		std::move(weights),
 		_projectData->_modelVerticesOffset,
@@ -1304,6 +1997,7 @@ MeshOperationResult<std::shared_ptr<ProjectData>> Editor::CreateProject() const
 {
 	return _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
 		_projectModel->_deformationType,
+		_projectModel->_pmvcComputeType,
 		_projectModel->_LBCWeightingScheme,
 		_projectModel->_meshFilepath.value(),
 		_projectModel->_cageFilepath.value(),
@@ -1317,6 +2011,7 @@ MeshOperationResult<std::shared_ptr<ProjectData>> Editor::CreateProject() const
 		_projectModel->_interpolateWeights,
 		_projectModel->_findOffset,
 		_projectModel->_noOffset,
+		_projectModel->_pmvcUseOffset,
 		_projectModel->_somigNu,
 		_projectModel->_somiglianaDeformer
 		);
@@ -1345,6 +2040,7 @@ MeshOperationResult<MeshComputeDeformationOperationResult> Editor::ComputeDeform
 	EigenMesh cage,
 	EigenMesh deformedCage,
 	const DeformationType deformationType,
+	const bool pmvcUseOffset,
 	const LBC::DataSetup::WeightingScheme weightingScheme,
 	const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
 	const int32_t modelVerticesOffset,
@@ -1355,6 +2051,7 @@ MeshOperationResult<MeshComputeDeformationOperationResult> Editor::ComputeDeform
 
 	return _meshOperationSystem->ExecuteOperation<MeshComputeDeformationOperation>(
 		deformationType,
+		pmvcUseOffset,
 		weightingScheme,
 		somiglianaDeformer,
 		std::move(mesh),

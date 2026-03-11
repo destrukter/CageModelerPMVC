@@ -18,19 +18,54 @@ CubemapManager::CubemapManager(const std::shared_ptr<RenderPipelineManager>& ren
 
 CubemapManager::~CubemapManager()
 {
-	//TODO cleanup
+	Cleanup();
 }
 
-void CubemapManager::Initialize()
+void CubemapManager::Cleanup() {
+	if (!_device) return;
+	vkDeviceWaitIdle(_device);
+	if (_indexBuffer._deviceBuffer != VK_NULL_HANDLE) {
+		_indexBuffer.ReleaseResource(_device);
+		_indexBuffer = MemoryMappedBuffer();
+	}
+	if (_vertexBuffer._deviceBuffer != VK_NULL_HANDLE) {
+		_vertexBuffer.ReleaseResource(_device);
+		_vertexBuffer = MemoryMappedBuffer();
+	}
+	if (_renderPass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(_device, _renderPass, nullptr);
+		_renderPass = VK_NULL_HANDLE;
+	}
+	if (_renderPassCpu != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(_device, _renderPassCpu, nullptr);
+		_renderPassCpu = VK_NULL_HANDLE;
+	}
+	if (_graphicCommandPool != VK_NULL_HANDLE) {
+		vkDestroyCommandPool(_device, _graphicCommandPool, nullptr);
+		_graphicCommandPool = VK_NULL_HANDLE;
+	}
+}
+
+void CubemapManager::Initialize(uint32_t cubemapSize)
 {
-	_descriptorPool = CreateRenderResource<DescriptorPool>(_device);
-	CreateCommandPool(_device->GetQueueFamilies()._graphics.value());
-	_renderPass = CreateRenderPass(_format, false);
-	_renderPassCpu = CreateRenderPass(_format, true);
-	CreateDescriptorSetLayouts();
-	_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
-	_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
-	//SphereWeightInitialization(512);
+	if (!init) {
+		_descriptorPool = CreateRenderResource<DescriptorPool>(_device);
+		CreateCommandPool(_device->GetQueueFamilies()._graphics.value());
+		_renderPass = CreateRenderPass(_format, false);
+		_renderPassCpu = CreateRenderPass(_format, true);
+		CreateDescriptorSetLayouts();
+		_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
+		_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
+		//SphereWeightInitialization(512);
+		init = true;
+	}
+	if(cubemapSize != _cubemapSize) {
+		_cubemapSize = cubemapSize;
+		_renderPipelineManager->ReleasePipeline(_cubemapPipelineHandle);
+		_renderPipelineManager->ReleasePipeline(_cubemapPipelineHandleCpu);
+		_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
+		_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
+	}
 }
 
 VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer) {
@@ -393,7 +428,7 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 	}
 }
 
-MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(DeformationType deformationType) {
+MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(PMVCComputeType computeType, const bool useOffset) {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
 	assert(_resourceManager && "ResourceManager is null");
@@ -409,7 +444,8 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		*this,
 		_cubemapSize,
 		_format,
-		deformationType,
+		computeType,
+		useOffset,
 
 		_device,
 		_descriptorPool,
@@ -445,5 +481,8 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		std::move(interpolatedWeights),
 		std::move(psi),
 		std::move(psiTri),
-		std::move(psiQuad)};
+		std::move(psiQuad),
+		instance.GetRenderMs(),
+		instance.GetComputeMs(),
+		instance.GetComputeTotalMs()};
 }

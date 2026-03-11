@@ -22,16 +22,18 @@
 #include <future>
 #include <mutex>
 #include <thread>
+#include <chrono>
 
 CubemapRenderInstance::~CubemapRenderInstance() {
-	//TODO: cleanup
+	Cleanup();
 }
 
 CubemapRenderInstance::CubemapRenderInstance()
 {
 	_cubemapSize = 32;
 	_format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	_deformationType = DeformationType::PMVCSerialNoOffset;
+	_computeType = PMVCComputeType::Serial;
+	_pmvcUseOffset = false;
 	Initialize();
 }
 
@@ -39,7 +41,8 @@ CubemapRenderInstance::CubemapRenderInstance(
 	CubemapManager& cubemapManager,
 	int cubemapSize,
 	VkFormat format,
-	DeformationType deformationType,
+	PMVCComputeType computeType,
+	bool useOffset,
 
 	RenderResourceRef<Device> device,
 	RenderResourceRef<DescriptorPool> descriptorPool,
@@ -61,7 +64,8 @@ CubemapRenderInstance::CubemapRenderInstance(
 	MemoryMappedBuffer vertexBuffer
 ): _cubemapSize(cubemapSize)
 , _format(format)
-, _deformationType(deformationType)
+, _computeType(computeType)
+, _pmvcUseOffset(useOffset)
 , _device(std::move(device))
 , _descriptorPool(std::move(descriptorPool))
 , _resourceManager(std::move(resourceManager))
@@ -80,10 +84,80 @@ CubemapRenderInstance::CubemapRenderInstance(
 	Initialize();
 }
 
-void CubemapRenderInstance::Initialize() {
-	_offset = DeformationTypeHelpers::PMVCOffset(_deformationType);
 
-	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
+void CubemapRenderInstance::Cleanup()
+{
+	if (!_device)
+		return;
+
+	vkDeviceWaitIdle(_device);
+
+	if (_computeStage)
+	{
+		_computeStage->Cleanup();
+		_computeStage.reset();
+	}
+
+	for (auto timeline : _timelines)
+	{
+		if (timeline != VK_NULL_HANDLE)
+			vkDestroySemaphore(_device, timeline, nullptr);
+	}
+	_timelines.clear();
+
+	if (_graphicCommandPool != VK_NULL_HANDLE)
+	{
+		vkDestroyCommandPool(_device, _graphicCommandPool, nullptr);
+		_graphicCommandPool = VK_NULL_HANDLE;
+	}
+
+	if (_cubemapRenderUnit.matricesUBO._deviceBuffer != VK_NULL_HANDLE)
+	{
+		_cubemapRenderUnit.matricesUBO.ReleaseResource(_device);
+		_cubemapRenderUnit.matricesUBO = MemoryMappedBuffer();
+	}
+
+	for (auto& target : _cubemapRenderUnit.targets)
+	{
+		for (auto framebuffer : target.framebuffers)
+		{
+			if (framebuffer != VK_NULL_HANDLE)
+				vkDestroyFramebuffer(_device, framebuffer, nullptr);
+		}
+		for (auto view : target.faceViews)
+		{
+			if (view != VK_NULL_HANDLE)
+				vkDestroyImageView(_device, view, nullptr);
+		}
+		for (auto view : target.depthViews)
+		{
+			if (view != VK_NULL_HANDLE)
+				vkDestroyImageView(_device, view, nullptr);
+		}
+
+		if (target.cubemapView != VK_NULL_HANDLE)
+			vkDestroyImageView(_device, target.cubemapView, nullptr);
+		if (target.depthView != VK_NULL_HANDLE)
+			vkDestroyImageView(_device, target.depthView, nullptr);
+
+		if (target.cubemapImage != VK_NULL_HANDLE)
+			vkDestroyImage(_device, target.cubemapImage, nullptr);
+		if (target.cubemapMemory != VK_NULL_HANDLE)
+			vkFreeMemory(_device, target.cubemapMemory, nullptr);
+
+		if (target.depthImage != VK_NULL_HANDLE)
+			vkDestroyImage(_device, target.depthImage, nullptr);
+		if (target.depthMemory != VK_NULL_HANDLE)
+			vkFreeMemory(_device, target.depthMemory, nullptr);
+	}
+
+	_cubemapRenderUnit.targets.clear();
+	_cubemapRenderUnit.graphicsCmdPerTarget.clear();
+}
+
+void CubemapRenderInstance::Initialize() {
+
+	if (_computeType == PMVCComputeType::Serial) {
 		_computeStage = std::make_unique<GpuSerialComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -94,10 +168,10 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh, 
-			_offset
+			_pmvcUseOffset
 		);
 	}
-	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Ring) {
 		_computeStage = std::make_unique<GpuAtomicComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -108,10 +182,10 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset
 		);
 	}
-	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::All) {
 		_computeStage = std::make_unique<GpuMPComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -122,10 +196,10 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset
 		);
 	}
-	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Cpu) {
 		_computeStage = std::make_unique<CpuComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -136,7 +210,7 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset
 		);
 	}
 
@@ -323,7 +397,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		};
 
 		VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-		if(_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType ==  DeformationType::PMVCCpuOffset)
+		if(_computeType == PMVCComputeType::Cpu)
 			fbInfo.renderPass = _renderPassCpu;
 		else
 			fbInfo.renderPass = _renderPass;
@@ -492,7 +566,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	};
 	
 	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
-	if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+	if (_computeType == PMVCComputeType::Cpu)
 		pipelineHandle = _cubemapPipelineHandleCpu;
 
 	const PipelineObject& pipelineObj =
@@ -535,7 +609,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			&push);
 
 		VkRenderPass renderPass = _renderPass;
-		if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+		if (_computeType == PMVCComputeType::Cpu)
 			renderPass = _renderPassCpu;
 
 		VkRenderPassBeginInfo rpInfo{
@@ -693,8 +767,11 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const CubemapWorkRange& range,
 	Eigen::MatrixXd& weights)
 {
-	LOG_DEBUG("ComputeCoordinatesGPUMP (batched)");
-
+	const auto totalStart = std::chrono::steady_clock::now();
+	auto waitStart = std::chrono::high_resolution_clock::now();
+	auto waitTemp = std::chrono::high_resolution_clock::now();
+	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
+  
 	auto* computeStage = static_cast<GpuMPComputeStrategy*>(_computeStage.get());
 	const auto vertices = BuildDeformableVertexPositions();
 
@@ -769,6 +846,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -904,6 +982,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	}
 
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): done");
 }
@@ -911,6 +991,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -1011,6 +1092,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 	}
 
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: done");
 }
@@ -1018,6 +1101,8 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 void CubemapRenderInstance::ComputeCoordinatesCpu(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
+	LOG_DEBUG("Start cpu");
 	auto* computeStage = static_cast<CpuComputeStrategy*>(_computeStage.get());
 	const auto vertices = BuildDeformableVertexPositions();
 
@@ -1084,20 +1169,27 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	}
 
 	weights = computeStage->Readback();
+	const auto computeEnd = std::chrono::steady_clock::now();
+	_computeMs = std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 }
 
 void CubemapRenderInstance::ComputeCoordinates(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights) {
-	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
+	_renderMs.reset();
+	_computeMs.reset();
+	_computeTotalMs.reset();
+	if (_computeType == PMVCComputeType::Serial) {
 		ComputeCoordinatesGPUSerial(range, weights);
 	}
-	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Ring) {
 		ComputeCoordinatesGPUAtomic(range, weights);
 	}
-	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::All) {
 		ComputeCoordinatesGPUMP(range, weights);
 	}
-	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Cpu) {
 		ComputeCoordinatesCpu(range, weights);
 	}
 }

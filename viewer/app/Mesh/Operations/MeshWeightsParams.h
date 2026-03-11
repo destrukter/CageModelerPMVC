@@ -20,15 +20,16 @@ enum class DeformationType : uint8_t
 	Green,
 	QGC,
 	Somigliana,
-	PMVCSerialOffset,
-	PMVCSerialNoOffset,
-	PMVCRingOffset,
-	PMVCRingNoOffset,
-	PMVCAllOffset,
-	PMVCAllNoOffset,
-	PMVCCpuOffset,
-	PMVCCpuNoOffset,
+	PMVC,
 	Raytracing
+};
+
+enum class PMVCComputeType : uint8_t
+{
+	Serial,
+	Ring,
+	All,
+	Cpu
 };
 
 struct DeformationTypeHelpers
@@ -76,37 +77,8 @@ struct DeformationTypeHelpers
 		{
 			return "Somigliana";
 		}
-		else if (deformationType == DeformationType::PMVCAllNoOffset)
-		{
-			return "PMVCAllNoOffset";
-		}
-		else if (deformationType == DeformationType::PMVCAllOffset)
-		{
-			return "PMVCAllOffset";
-		}
-		else if (deformationType == DeformationType::PMVCCpuNoOffset)
-		{
-			return "PMVCCpuNoOffset";
-		}
-		else if (deformationType == DeformationType::PMVCCpuOffset)
-		{
-			return "PMVCCpuOffset";
-		}
-		else if (deformationType == DeformationType::PMVCRingNoOffset)
-		{
-			return "PMVCRingNoOffset";
-		}
-		else if (deformationType == DeformationType::PMVCRingOffset)
-		{
-			return "PMVCRingOffset";
-		}
-		else if (deformationType == DeformationType::PMVCSerialNoOffset)
-		{
-			return "PMVCSerialNoOffset";
-		}
-		else if (deformationType == DeformationType::PMVCSerialOffset)
-		{
-			return "PMVCSerialOffset";
+		else if (deformationType == DeformationType::PMVC) {
+			return "PMVC";
 		}
 		else if (deformationType == DeformationType::Raytracing)
 		{
@@ -122,14 +94,7 @@ struct DeformationTypeHelpers
 	}
 	[[nodiscard]] static bool IsPMVC(const DeformationType deformationType)
 	{
-		return PMVCOffset(deformationType) || PMVCNoOffset(deformationType);
-	}
-	[[nodiscard]] static bool PMVCOffset(const DeformationType deformationType)
-	{
-		return deformationType == DeformationType::PMVCSerialOffset || deformationType == DeformationType::PMVCRingOffset || deformationType == DeformationType::PMVCAllOffset || deformationType == DeformationType::PMVCCpuOffset;
-	}
-	[[nodiscard]] static bool PMVCNoOffset(const DeformationType deformationType) {
-		return deformationType == DeformationType::PMVCSerialNoOffset || deformationType == DeformationType::PMVCRingNoOffset || deformationType == DeformationType::PMVCAllNoOffset || deformationType == DeformationType::PMVCCpuNoOffset;
+		return deformationType == DeformationType::PMVC;
 	}
 	[[nodiscard]] static bool CanInterpolateWeights(const DeformationType deformationType)
 	{
@@ -161,7 +126,10 @@ struct MeshComputeWeightsOperationResult
 		Eigen::MatrixXd interpolatedWeights,
 		Eigen::MatrixXd psi,
 		std::vector<double> psiTri,
-		std::vector<Eigen::Vector4d> psiQuad)
+		std::vector<Eigen::Vector4d> psiQuad,
+		std::optional<double> renderMs = std::nullopt,
+		std::optional<double> computeMs = std::nullopt,
+		std::optional<double> computeTotalMs = std::nullopt)
 	{
 		_skinningMatrix = std::move(skinningMatrix);
 		_weights = std::move(weights);
@@ -169,6 +137,9 @@ struct MeshComputeWeightsOperationResult
 		_psi = std::move(psi);
 		_psiTri = std::move(psiTri);
 		_psiQuad = std::move(psiQuad);
+		_renderMs = renderMs;
+		_computeMs = computeMs;
+		_computeTotalMs = computeTotalMs;
 	}
 
 	Eigen::MatrixXd _skinningMatrix;
@@ -177,6 +148,9 @@ struct MeshComputeWeightsOperationResult
 	Eigen::MatrixXd _psi;
 	std::vector<double> _psiTri;
 	std::vector<Eigen::Vector4d> _psiQuad;
+	std::optional<double> _renderMs;
+	std::optional<double> _computeMs;
+	std::optional<double> _computeTotalMs;
 };
 
 struct InterpolatedVertexData
@@ -198,6 +172,7 @@ struct MeshComputeDeformationOperationResult
 struct ProjectData
 {
 	ProjectData(const DeformationType deformationType,
+		const PMVCComputeType pmvcComputeType,
 		const LBC::DataSetup::WeightingScheme LBCWeightingScheme,
 		EigenMesh mesh,
 		EigenMesh cage,
@@ -218,8 +193,10 @@ struct ProjectData
 		const glm::vec3& centerOffset,
 		const bool interpolateWeights,
 		const bool findOffset,
-		const bool noOffset)
+		const bool noOffset,
+		const bool pmvcUseOffset)
 		: _deformationType(deformationType)
+		, _pmvcComputeType(pmvcComputeType)
 		, _LBCWeightingScheme(LBCWeightingScheme)
 		, _mesh(std::move(mesh))
 		, _cage(std::move(cage))
@@ -241,6 +218,7 @@ struct ProjectData
 		, _interpolateWeights(interpolateWeights)
 		, _findOffset(findOffset)
 		, _noOffset(noOffset)
+		, _pmvcUseOffset(pmvcUseOffset)
 	{
 	}
 
@@ -248,6 +226,7 @@ struct ProjectData
 		: _interpolateWeights(false)
 		, _findOffset(false)
 		, _noOffset(false)
+		, _pmvcUseOffset(false)
 	{ }
 
 	[[nodiscard]] bool HarmonicOrLBC() const
@@ -271,6 +250,7 @@ struct ProjectData
 	}
 
 	DeformationType _deformationType = DeformationType::Green;
+	PMVCComputeType _pmvcComputeType = PMVCComputeType::All;
 	LBC::DataSetup::WeightingScheme _LBCWeightingScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 
 	EigenMesh _mesh;
@@ -305,4 +285,5 @@ struct ProjectData
 	uint32_t _interpolateWeights : 1;
 	uint32_t _findOffset : 1;
 	uint32_t _noOffset : 1;
+	uint32_t _pmvcUseOffset : 1;
 };

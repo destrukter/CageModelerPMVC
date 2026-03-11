@@ -13,6 +13,7 @@
 //#include <Rendering/PMVC/CubemapRenderInstance.h>
 #include <Rendering/PMVC/SphereWeightCalculator.h>
 #include <Mesh/Operations/MeshWeightsParams.h>
+#include <optional>
 
 
 class CubemapManager;
@@ -43,17 +44,6 @@ struct CubemapRenderUnit
 	VkDescriptorSet    matricesDescriptorSet;
 };
 
-enum class ComputeType {
-	CPU,
-	GPUATOMIC,
-	//GPUSORT,
-	DEBUGCUBEMAPS, // for debugging writes cupemaps to disk no compute
-	GPUSERIAL ,
-	GPUMP
-	// TODO: implement if time leftover
-};
-
-
 struct CubemapMatricesUBO
 {
 	float invNumTriangles;
@@ -70,7 +60,8 @@ public:
 		CubemapManager& cubemapManager,
 		int cubemapSize,
 		VkFormat format,
-		DeformationType deformationType,
+		PMVCComputeType computeType,
+		bool useOffset,
 
 		RenderResourceRef<Device> device,
 		RenderResourceRef<DescriptorPool> descriptorPool,
@@ -101,6 +92,10 @@ public:
 		const CubemapWorkRange& range,
 		Eigen::MatrixXd& weights);
 	void ComputeCoordinates(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
+	[[nodiscard]] std::optional<double> GetRenderMs() const { return _renderMs; }
+	[[nodiscard]] std::optional<double> GetComputeMs() const { return _computeMs; }
+	[[nodiscard]] std::optional<double> GetComputeTotalMs() const { return _computeTotalMs; }
+	void Cleanup();
 
 private:
 	//CubemapManager& _cubemapManager;
@@ -108,12 +103,15 @@ private:
 	std::unique_ptr<ICubemapComputeStrategy> _computeStage;
 	
 	//offset
-	float _offset;
+	bool _pmvcUseOffset;
 
 	//parameters 
 	unsigned int _cubemapSize;
 	VkFormat _format;
-	DeformationType _deformationType;
+	PMVCComputeType _computeType;
+	std::optional<double> _renderMs;
+	std::optional<double> _computeMs;
+	std::optional<double> _computeTotalMs;
 
 	//init functions
 	void Initialize();
