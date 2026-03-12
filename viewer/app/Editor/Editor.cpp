@@ -507,6 +507,7 @@ void Editor::StartEvaluation()
 		std::optional<double> _renderMs;
 		std::optional<double> _computeMs;
 		std::optional<double> _computeTotalMs;
+		std::optional<double> _transferMs;
 		std::optional<double> _deformationApplyMs;
 		std::optional<int32_t> _meshVertexCount;
 		std::optional<int32_t> _cageVertexCount;
@@ -607,6 +608,7 @@ void Editor::StartEvaluation()
 				std::nullopt,
 				std::nullopt,
 				std::nullopt,
+				std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
@@ -667,6 +669,7 @@ void Editor::StartEvaluation()
 			stageTimings._renderMs,
 			stageTimings._computeMs,
 			stageTimings._computeTotalMs,
+			stageTimings._transferMs,
 			stageTimings._deformationApplyMs,
 						meshVertexCount,
 			cageVertexCount,
@@ -715,6 +718,10 @@ void Editor::StartEvaluation()
 		if (result._computeTotalMs.has_value())
 		{
 			timingOutput << ",\n      \"computeTotalMs\": " << result._computeTotalMs.value();
+		}
+		if (result._transferMs.has_value())
+		{
+			timingOutput << ",\n      \"transferMs\": " << result._transferMs.value();
 		}
 		if (result._deformationApplyMs.has_value())
 		{
@@ -1241,6 +1248,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 		const auto renderMs = weightsResult.GetValue()._renderMs;
 		const auto computeMs = weightsResult.GetValue()._computeMs;
 		const auto computeTotalMs = weightsResult.GetValue()._computeTotalMs;
+		const auto transferMs = weightsResult.GetValue()._transferMs;
 
 		_weightsData.Update(std::move(weightsResult.GetValue()._skinningMatrix),
 			std::move(weightsResult.GetValue()._weights),
@@ -1298,11 +1306,13 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 				{
 					_latestEvaluationStageTimings._renderMs = renderMs;
 					_latestEvaluationStageTimings._computeMs = computeMs;
+					_latestEvaluationStageTimings._transferMs = transferMs;
 				}
 				else
 				{
 					_latestEvaluationStageTimings._renderMs.reset();
 					_latestEvaluationStageTimings._computeMs.reset();
+					_latestEvaluationStageTimings._transferMs.reset();
 				}
 				_latestEvaluationStageTimings._deformationApplyMs = deformationApplyMs;
 			}

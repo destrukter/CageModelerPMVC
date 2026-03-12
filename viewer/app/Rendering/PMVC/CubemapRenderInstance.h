@@ -96,6 +96,7 @@ public:
 	[[nodiscard]] std::optional<double> GetRenderMs() const { return _renderMs; }
 	[[nodiscard]] std::optional<double> GetComputeMs() const { return _computeMs; }
 	[[nodiscard]] std::optional<double> GetComputeTotalMs() const { return _computeTotalMs; }
+	[[nodiscard]] std::optional<double> GetTransferMs() const { return _transferMs; }
 	void Cleanup();
 
 private:
@@ -114,6 +115,7 @@ private:
 	std::optional<double> _renderMs;
 	std::optional<double> _computeMs;
 	std::optional<double> _computeTotalMs;
+	std::optional<double> _transferMs;
 
 	//init functions
 	void Initialize();
