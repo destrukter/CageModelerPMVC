@@ -674,7 +674,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		vkCmdPushConstants(
 			cmd,
 			pipelineObj._pipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 			0,
 			sizeof(push),
 			&push);
