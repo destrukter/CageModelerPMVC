@@ -428,7 +428,7 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 	}
 }
 
-MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(PMVCComputeType computeType, const bool useOffset) {
+MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(PMVCComputeType computeType, const bool useOffset, const uint32_t targetCount) {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
 	assert(_resourceManager && "ResourceManager is null");
@@ -446,6 +446,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		_format,
 		computeType,
 		useOffset,
+		targetCount,
 
 		_device,
 		_descriptorPool,
