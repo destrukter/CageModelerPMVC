@@ -484,5 +484,6 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		std::move(psiQuad),
 		instance.GetRenderMs(),
 		instance.GetComputeMs(),
-		instance.GetComputeTotalMs()};
+		instance.GetComputeTotalMs(),
+		instance.GetTransferMs()};
 }
