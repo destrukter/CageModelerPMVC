@@ -2029,8 +2029,11 @@ void Editor::OnComputeInfluenceColorMap(const bool shouldRenderInfluenceMap) con
 void Editor::ExportWeights(std::filesystem::path filepath) const
 {
 	CheckFormat(!_isComputingWeightsData.load(std::memory_order_relaxed), "The weights and the deformation mesh haven't been computed yet to export.");
-
 	const auto weightsData = _weightsData.LockRead();
+	const auto weightsToExport = DeformationTypeHelpers::IsPMVC(_projectData->_deformationType)
+		? weightsData->_weights.transpose()
+		: weightsData->_weights;
+
 	const auto embedding = _projectData->_embedding.value_or(EigenMesh{ });
 
 	_meshOperationSystem->ExecuteOperation<MeshExportWeightsOperation>(
