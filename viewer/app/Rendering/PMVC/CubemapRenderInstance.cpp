@@ -1209,7 +1209,7 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	_renderMs = renderAccumulatedMs;
 	_computeMs = computeAccumulatedMs;
 	_transferMs = transferAccumulatedMs;
-	_computeTotalMs = computeAccumulatedMs + transferAccumulatedMs;
+	_computeTotalMs = renderAccumulatedMs + computeAccumulatedMs + transferAccumulatedMs;
 }
 
 void CubemapRenderInstance::ComputeCoordinates(

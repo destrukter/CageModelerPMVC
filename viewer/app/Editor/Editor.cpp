@@ -1249,6 +1249,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 		const auto computeMs = weightsResult.GetValue()._computeMs;
 		const auto computeTotalMs = weightsResult.GetValue()._computeTotalMs;
 		const auto transferMs = weightsResult.GetValue()._transferMs;
+		const auto cubemapInitMs = weightsResult.GetValue()._initMs;
 
 		_weightsData.Update(std::move(weightsResult.GetValue()._skinningMatrix),
 			std::move(weightsResult.GetValue()._weights),
@@ -1299,7 +1300,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 			_projectData = projectData;
 			{
 				std::scoped_lock lock(_evaluationTimingsMutex);
-				_latestEvaluationStageTimings._initMs = initMs;
+				_latestEvaluationStageTimings._initMs = initMs + cubemapInitMs.value_or(0.0);
 				_latestEvaluationStageTimings._computeTotalMs = computeTotalMs;
 				if (projectData->_deformationType == DeformationType::PMVC &&
 					(projectData->_pmvcComputeType == PMVCComputeType::All || projectData->_pmvcComputeType == PMVCComputeType::Cpu))

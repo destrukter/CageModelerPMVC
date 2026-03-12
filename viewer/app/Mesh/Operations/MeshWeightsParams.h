@@ -130,7 +130,8 @@ struct MeshComputeWeightsOperationResult
 		std::optional<double> renderMs = std::nullopt,
 		std::optional<double> computeMs = std::nullopt,
 		std::optional<double> computeTotalMs = std::nullopt,
-		std::optional<double> transferMs = std::nullopt)
+		std::optional<double> transferMs = std::nullopt,
+		std::optional<double> initMs = std::nullopt)
 	{
 		_skinningMatrix = std::move(skinningMatrix);
 		_weights = std::move(weights);
@@ -142,6 +143,7 @@ struct MeshComputeWeightsOperationResult
 		_computeMs = computeMs;
 		_computeTotalMs = computeTotalMs;
 		_transferMs = transferMs;
+		_initMs = initMs;
 	}
 
 	Eigen::MatrixXd _skinningMatrix;
@@ -154,6 +156,7 @@ struct MeshComputeWeightsOperationResult
 	std::optional<double> _computeMs;
 	std::optional<double> _computeTotalMs;
 	std::optional<double> _transferMs;
+	std::optional<double> _initMs;
 };
 
 struct InterpolatedVertexData
