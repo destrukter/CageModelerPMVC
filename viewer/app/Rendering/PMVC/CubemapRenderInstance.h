@@ -14,6 +14,7 @@
 #include <Rendering/PMVC/SphereWeightCalculator.h>
 #include <Mesh/Operations/MeshWeightsParams.h>
 #include <optional>
+#include <string>
 
 
 class CubemapManager;
@@ -151,6 +152,7 @@ private:
 	std::vector <VkSemaphore> _timelines = {};
 	glm::mat4 ComputeCubemapViewMatrix(uint32_t faceIndex, const glm::vec3& pos);
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+	void DumpCubemapToPng(const CubemapRenderTarget& target, const std::string& filename) const;
 	//friend class GpuSerialComputeStrategy;
 	SphereWeightCalculator _sphereWeightCalculator;
 

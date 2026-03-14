@@ -24,6 +24,8 @@
 #include <thread>
 #include <chrono>
 
+#include "../../external/stb_image_write.h"
+
 CubemapRenderInstance::~CubemapRenderInstance() {
 	Cleanup();
 }
@@ -851,6 +853,151 @@ uint32_t CubemapRenderInstance::FindMemoryType(uint32_t typeFilter, VkMemoryProp
 	throw std::runtime_error("Failed to find suitable memory type!");
 }
 
+void CubemapRenderInstance::DumpCubemapToPng(const CubemapRenderTarget& target, const std::string& filename) const
+{
+	const VkDeviceSize bytesPerPixel = 16; // VK_FORMAT_R32G32B32A32_SFLOAT
+	const VkDeviceSize faceBytes = static_cast<VkDeviceSize>(_cubemapSize) * _cubemapSize * bytesPerPixel;
+	const VkDeviceSize totalBytes = faceBytes * 6;
+
+	VkBuffer stagingBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+
+	VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	bufferInfo.size = totalBytes;
+	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VK_CHECK(vkCreateBuffer(_device, &bufferInfo, nullptr, &stagingBuffer));
+
+	VkMemoryRequirements memRequirements{};
+	vkGetBufferMemoryRequirements(_device, stagingBuffer, &memRequirements);
+
+	VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	allocInfo.allocationSize = memRequirements.size;
+	allocInfo.memoryTypeIndex = FindMemoryType(
+		memRequirements.memoryTypeBits,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &stagingMemory));
+	VK_CHECK(vkBindBufferMemory(_device, stagingBuffer, stagingMemory, 0));
+
+	VkCommandBufferAllocateInfo cmdAllocInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	cmdAllocInfo.commandPool = _graphicCommandPool;
+	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmdAllocInfo.commandBufferCount = 1;
+
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &cmd));
+
+	VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+	VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = target.cubemapImage;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.baseMipLevel = 0;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount = 6;
+
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &barrier);
+
+	std::array<VkBufferImageCopy, 6> copyRegions{};
+	for (uint32_t face = 0; face < 6; ++face)
+	{
+		copyRegions[face].bufferOffset = faceBytes * face;
+		copyRegions[face].bufferRowLength = 0;
+		copyRegions[face].bufferImageHeight = 0;
+		copyRegions[face].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		copyRegions[face].imageSubresource.mipLevel = 0;
+		copyRegions[face].imageSubresource.baseArrayLayer = face;
+		copyRegions[face].imageSubresource.layerCount = 1;
+		copyRegions[face].imageOffset = { 0, 0, 0 };
+		copyRegions[face].imageExtent = { _cubemapSize, _cubemapSize, 1 };
+	}
+
+	vkCmdCopyImageToBuffer(
+		cmd,
+		target.cubemapImage,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		stagingBuffer,
+		static_cast<uint32_t>(copyRegions.size()),
+		copyRegions.data());
+
+	VK_CHECK(vkEndCommandBuffer(cmd));
+
+	VkSubmitInfo submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmd;
+
+	VkQueue graphicsQueue = VK_NULL_HANDLE;
+	vkGetDeviceQueue(_device, _device->GetQueueFamilies()._graphics.value(), 0, &graphicsQueue);
+	VK_CHECK(vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+	VK_CHECK(vkQueueWaitIdle(graphicsQueue));
+
+	void* mapped = nullptr;
+	VK_CHECK(vkMapMemory(_device, stagingMemory, 0, totalBytes, 0, &mapped));
+
+	const float* src = static_cast<const float*>(mapped);
+	const uint32_t bpp = 4;
+	const uint32_t crossWidth = _cubemapSize * 4;
+	const uint32_t crossHeight = _cubemapSize * 3;
+	std::vector<uint8_t> cross(crossWidth * crossHeight * bpp, 0);
+
+	auto copyFace = [&](uint32_t faceIndex, uint32_t gridX, uint32_t gridY)
+	{
+		const size_t srcFaceOffset = static_cast<size_t>(faceIndex) * _cubemapSize * _cubemapSize * bpp;
+		for (uint32_t y = 0; y < _cubemapSize; ++y)
+		{
+			for (uint32_t x = 0; x < _cubemapSize; ++x)
+			{
+				const size_t srcIdx = srcFaceOffset + (static_cast<size_t>(y) * _cubemapSize + x) * bpp;
+				const size_t dstIdx = ((static_cast<size_t>(gridY) * _cubemapSize + y) * crossWidth + (static_cast<size_t>(gridX) * _cubemapSize + x)) * bpp;
+				for (uint32_t c = 0; c < bpp; ++c)
+				{
+					const float value = std::max(0.0f, std::min(1.0f, src[srcIdx + c]));
+					cross[dstIdx + c] = static_cast<uint8_t>(value * 255.0f);
+				}
+			}
+		}
+	};
+
+	copyFace(2, 1, 0); // +Y
+	copyFace(1, 0, 1); // -X
+	copyFace(4, 1, 1); // +Z
+	copyFace(0, 2, 1); // +X
+	copyFace(5, 3, 1); // -Z
+	copyFace(3, 1, 2); // -Y
+
+	stbi_write_png(
+		filename.c_str(),
+		static_cast<int>(crossWidth),
+		static_cast<int>(crossHeight),
+		4,
+		cross.data(),
+		static_cast<int>(crossWidth * bpp));
+
+	vkUnmapMemory(_device, stagingMemory);
+	vkFreeCommandBuffers(_device, _graphicCommandPool, 1, &cmd);
+	vkDestroyBuffer(_device, stagingBuffer, nullptr);
+	vkFreeMemory(_device, stagingMemory, nullptr);
+
+	LOG_INFO("Wrote debug cubemap to {}", filename);
+}
+
+
 void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const CubemapWorkRange& range,
 	Eigen::MatrixXd& weights)
@@ -919,6 +1066,14 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 			}
 			const auto renderEnd = std::chrono::steady_clock::now();
 			renderAccumulatedMs += std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+
+			for (uint32_t slot = 0; slot < batchCount; ++slot)
+			{
+				const uint32_t cubemapIdx = range.first + batchStart + slot;
+				const std::string debugFilename =
+					"debug_mp_cubemap_v" + std::to_string(cubemapIdx) + "_hit" + std::to_string(hit) + ".png";
+				DumpCubemapToPng(_cubemapRenderUnit.targets[slot], debugFilename);
+			}
 
 			if (_omitNegative && ((hit + 1) % 2u == 0u))
 			{
