@@ -520,6 +520,85 @@ void Editor::StartEvaluation()
 	std::vector<EvaluationResult> results;
 	results.reserve(parsedConfig->_projects.size());
 
+	auto writeTimingResults = [&]() -> bool
+	{
+		std::ofstream timingOutput(timingOutputPath, std::ios::out | std::ios::trunc);
+		if (!timingOutput.is_open())
+		{
+			LOG_ERROR("Unable to open timing output file '{}'.", timingOutputPath.string());
+			return false;
+		}
+
+		timingOutput << "{\n";
+		timingOutput << "  \"buildType\": \"" << EscapeJsonString(buildType) << "\",\n";
+		timingOutput << "  \"projectCount\": " << parsedConfig->_projects.size() << ",\n";
+		timingOutput << "  \"results\": [\n";
+		for (std::size_t resultIndex = 0; resultIndex < results.size(); ++resultIndex)
+		{
+			const auto& result = results[resultIndex];
+			timingOutput << "    {\n";
+			timingOutput << "      \"projectName\": \"" << EscapeJsonString(result._projectName) << "\",\n";
+			timingOutput << "      \"coordinateType\": \"" << EscapeJsonString(result._coordinateType) << "\",\n";
+			timingOutput << "      \"status\": \"" << EscapeJsonString(result._status) << "\"";
+			if (result._elapsedMs.has_value())
+			{
+				timingOutput << ",\n      \"elapsedMs\": " << result._elapsedMs.value();
+			}
+			if (result._initMs.has_value())
+			{
+				timingOutput << ",\n      \"initMs\": " << result._initMs.value();
+			}
+			if (result._renderMs.has_value())
+			{
+				timingOutput << ",\n      \"renderMs\": " << result._renderMs.value();
+			}
+			if (result._transferMs.has_value())
+			{
+				timingOutput << ",\n      \"transferMs\": " << result._transferMs.value();
+			}
+			if (result._computeMs.has_value())
+			{
+				timingOutput << ",\n      \"computeMs\": " << result._computeMs.value();
+			}
+			if (result._computeTotalMs.has_value())
+			{
+				timingOutput << ",\n      \"computeTotalMs\": " << result._computeTotalMs.value();
+			}
+			if (result._deformationApplyMs.has_value())
+			{
+				timingOutput << ",\n      \"deformationApplyMs\": " << result._deformationApplyMs.value();
+			}
+			if (result._meshVertexCount.has_value())
+			{
+				timingOutput << ",\n      \"numMeshVertices\": " << result._meshVertexCount.value();
+			}
+			if (result._cageVertexCount.has_value())
+			{
+				timingOutput << ",\n      \"numCageVertices\": " << result._cageVertexCount.value();
+			}
+			if (result._pmvcComputeType.has_value())
+			{
+				timingOutput << ",\n      \"pmvcComputeType\": \"" << EscapeJsonString(result._pmvcComputeType.value()) << "\"";
+			}
+			if (result._pmvcUseOffset.has_value())
+			{
+				timingOutput << ",\n      \"pmvcUseOffset\": " << (result._pmvcUseOffset.value() ? "true" : "false");
+			}
+			if (result._cubemapSize.has_value())
+			{
+				timingOutput << ",\n      \"cubemapSize\": " << result._cubemapSize.value();
+			}
+			if (result._pmvcTargetCount.has_value())
+			{
+				timingOutput << ",\n      \"targetCount\": " << result._pmvcTargetCount.value();
+			}
+			timingOutput << "\n    }" << (resultIndex + 1 < results.size() ? "," : "") << "\n";
+		}
+		timingOutput << "  ]\n";
+		timingOutput << "}\n";
+		return true;
+	};
+
 	
 	_isEvaluationMode = true;
 
@@ -613,6 +692,7 @@ void Editor::StartEvaluation()
 				(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt });
+			writeTimingResults();
 			continue;
 		}
 
@@ -677,84 +757,12 @@ void Editor::StartEvaluation()
 			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt });
+		writeTimingResults();
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
 	_isEvaluationMode = false;
-	std::ofstream timingOutput(timingOutputPath, std::ios::out | std::ios::trunc);
-	if (!timingOutput.is_open())
-	{
-		LOG_ERROR("Unable to open timing output file '{}'.", timingOutputPath.string());
-		return;
-	}
-
-	timingOutput << "{\n";
-	timingOutput << "  \"buildType\": \"" << EscapeJsonString(buildType) << "\",\n";
-	timingOutput << "  \"projectCount\": " << parsedConfig->_projects.size() << ",\n";
-	timingOutput << "  \"results\": [\n";
-	for (std::size_t i = 0; i < results.size(); ++i)
-	{
-		const auto& result = results[i];
-		timingOutput << "    {\n";
-		timingOutput << "      \"projectName\": \"" << EscapeJsonString(result._projectName) << "\",\n";
-		timingOutput << "      \"coordinateType\": \"" << EscapeJsonString(result._coordinateType) << "\",\n";
-		timingOutput << "      \"status\": \"" << EscapeJsonString(result._status) << "\"";
-		if (result._elapsedMs.has_value())
-		{
-			timingOutput << ",\n      \"elapsedMs\": " << result._elapsedMs.value();
-		}
-		if (result._initMs.has_value())
-		{
-			timingOutput << ",\n      \"initMs\": " << result._initMs.value();
-		}
-		if (result._renderMs.has_value())
-		{
-			timingOutput << ",\n      \"renderMs\": " << result._renderMs.value();
-		}
-		if (result._transferMs.has_value())
-		{
-			timingOutput << ",\n      \"transferMs\": " << result._transferMs.value();
-		}
-		if (result._computeMs.has_value())
-		{
-			timingOutput << ",\n      \"computeMs\": " << result._computeMs.value();
-		}
-		if (result._computeTotalMs.has_value())
-		{
-			timingOutput << ",\n      \"computeTotalMs\": " << result._computeTotalMs.value();
-		}
-		if (result._deformationApplyMs.has_value())
-		{
-			timingOutput << ",\n      \"deformationApplyMs\": " << result._deformationApplyMs.value();
-		}
-		if (result._meshVertexCount.has_value())
-		{
-			timingOutput << ",\n      \"numMeshVertices\": " << result._meshVertexCount.value();
-		}
-		if (result._cageVertexCount.has_value())
-		{
-			timingOutput << ",\n      \"numCageVertices\": " << result._cageVertexCount.value();
-		}
-		if (result._pmvcComputeType.has_value())
-		{
-			timingOutput << ",\n      \"pmvcComputeType\": \"" << EscapeJsonString(result._pmvcComputeType.value()) << "\"";
-		}
-		if (result._pmvcUseOffset.has_value())
-		{
-			timingOutput << ",\n      \"pmvcUseOffset\": " << (result._pmvcUseOffset.value() ? "true" : "false");
-		}
-		if (result._cubemapSize.has_value())
-		{
-			timingOutput << ",\n      \"cubemapSize\": " << result._cubemapSize.value();
-		}
-		if (result._pmvcTargetCount.has_value())
-		{
-			timingOutput << ",\n      \"targetCount\": " << result._pmvcTargetCount.value();
-		}
-		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
-	}
-	timingOutput << "  ]\n";
-	timingOutput << "}\n";
+	writeTimingResults();
 }
 
 void Editor::CreateSceneLights() const
