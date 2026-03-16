@@ -19,10 +19,48 @@
 
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <future>
 #include <mutex>
+#include <utility>
 #include <thread>
 #include <chrono>
+#include <cmath>
+
+
+namespace
+{
+	[[nodiscard]] std::pair<float, float> ComputeCubemapNearFarPlanes(const EigenMesh& cageMesh, const glm::vec3& cameraPosition)
+	{
+		constexpr float kMinNear = 1e-5f;
+		constexpr float kNearFromClosestScale = 0.25f;
+		constexpr float kFarPaddingScale = 1.05f;
+		constexpr float kFarPaddingAbsolute = 1e-3f;
+
+		float minDistance = std::numeric_limits<float>::max();
+		float maxDistance = 0.0f;
+
+		for (Eigen::Index i = 0; i < cageMesh._vertices.rows(); ++i)
+		{
+			const float dx = static_cast<float>(cageMesh._vertices(i, 0)) - cameraPosition.x;
+			const float dy = static_cast<float>(cageMesh._vertices(i, 1)) - cameraPosition.y;
+			const float dz = static_cast<float>(cageMesh._vertices(i, 2)) - cameraPosition.z;
+			const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+			minDistance = std::min(minDistance, distance);
+			maxDistance = std::max(maxDistance, distance);
+		}
+
+		if (!std::isfinite(minDistance) || !std::isfinite(maxDistance) || maxDistance <= 0.0f)
+		{
+			return { kMinNear, 1000.0f };
+		}
+
+		const float nearPlane = std::max(kMinNear, minDistance * kNearFromClosestScale);
+		const float farPlane = std::max(nearPlane + kFarPaddingAbsolute, maxDistance * kFarPaddingScale + kFarPaddingAbsolute);
+		return { nearPlane, farPlane };
+	}
+}
 
 CubemapRenderInstance::~CubemapRenderInstance() {
 	Cleanup();
@@ -593,6 +631,8 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		&ubo,
 		sizeof(ubo));
 
+	const auto [nearPlane, farPlane] = ComputeCubemapNearFarPlanes(_cageMesh, camPos);
+
 	// =====================================================================
 	// GRAPHICS CMDS — one per face
 	// =====================================================================
@@ -603,7 +643,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
 		CubemapPushConstants push{};
-		push.proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+		push.proj = glm::perspective(glm::radians(90.0f), 1.0f, nearPlane, farPlane);
 		push.proj[1][1] *= -1.0f;
 		push.view = ComputeCubemapViewMatrix(face, camPos);
 
