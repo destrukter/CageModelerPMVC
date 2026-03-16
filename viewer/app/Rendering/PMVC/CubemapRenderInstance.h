@@ -26,12 +26,15 @@ struct CubemapRenderTarget
 	VkImageView    cubemapView;
 	std::array<VkImageView, 6> faceViews;
 
-	VkImage        depthImage;
-	VkDeviceMemory depthMemory;
-	VkImageView    depthView;
-	std::array<VkImageView, 6> depthViews;
-	
-	std::array<VkFramebuffer, 6> framebuffers;
+	VkImage        depthImage = VK_NULL_HANDLE;
+	VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+	VkImageView    depthView = VK_NULL_HANDLE;
+	std::array<VkImage, 2> depthImages{};
+	std::array<VkDeviceMemory, 2> depthMemories{};
+	std::array<VkImageView, 2> depthViewsArray{};
+	std::array<std::array<VkImageView, 6>, 2> depthViews{};
+	std::array<std::array<VkFramebuffer, 6>, 2> framebuffers{};
+	std::array<VkDescriptorSet, 2> depthHistoryDescriptorSets{};
 };
 
 struct CubemapRenderUnit
@@ -63,6 +66,8 @@ public:
 		PMVCComputeType computeType,
 		bool useOffset,
 		uint32_t targetCount,
+		uint32_t hitCount,
+		bool omitNegative,
 
 		RenderResourceRef<Device> device,
 		RenderResourceRef<DescriptorPool> descriptorPool,
@@ -77,8 +82,10 @@ public:
 		VkRenderPass renderPassCpu,
 		PipelineHandle cubemapPipelineHandle,
 		PipelineHandle cubemapPipelineHandleCpu,
+		PipelineHandle cubemapPipelineHitHandle,
 
 		RenderResourceRef<DescriptorSetLayout> matricesLayout,
+		RenderResourceRef<DescriptorSetLayout> depthHistoryLayout,
 
 		MemoryMappedBuffer indexBuffer,
 		MemoryMappedBuffer vertexBuffer
@@ -110,6 +117,8 @@ private:
 	//parameters 
 	unsigned int _cubemapSize;
 	uint32_t _targetCount = 64;
+	uint32_t _hitCount = 3;
+	bool _omitNegative = true;
 	VkFormat _format;
 	PMVCComputeType _computeType;
 	std::optional<double> _renderMs;
@@ -127,7 +136,7 @@ private:
 	void CreateSyncObjects();
 
 	void RecordAndSubmitCubemapRender(uint32_t cubemapIdx, uint32_t targetIndex, const glm::vec3& camPos,
-		CubemapRenderTarget& target, VkSemaphore timeline, uint64_t signalValue); //TODO submit cubemap at once not in 6 parts
+		CubemapRenderTarget& target, VkSemaphore timeline, uint64_t signalValue, uint32_t hitIndex); //TODO submit cubemap at once not in 6 parts
 	std::vector<glm::vec3> BuildDeformableVertexPositions() const;
 
 	void ComputeCoordinatesCpu(
@@ -157,7 +166,10 @@ private:
 	VkRenderPass _renderPassCpu;
 	PipelineHandle _cubemapPipelineHandle;
 	PipelineHandle _cubemapPipelineHandleCpu;
+	PipelineHandle _cubemapPipelineHitHandle;
 	RenderResourceRef<DescriptorSetLayout>  _matricesLayout;
+	RenderResourceRef<DescriptorSetLayout>  _depthHistoryLayout;
 	MemoryMappedBuffer _indexBuffer;
 	MemoryMappedBuffer _vertexBuffer;
+	VkSampler _depthHistorySampler = VK_NULL_HANDLE;
 };
