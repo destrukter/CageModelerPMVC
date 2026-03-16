@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstddef>
 #include <thread>
+#include <cmath>
 
 
 uint32_t CpuComputeStrategy::RequiredRenderTargetCount() const
@@ -102,9 +103,14 @@ Eigen::MatrixXd CpuComputeStrategy::Readback()
 {
     for (Eigen::Index row = 0; row < _lambdaResults.rows(); ++row)
     {
-        if (_wsumResults[static_cast<size_t>(row)] > std::numeric_limits<float>::epsilon())
+        const float wsum = _wsumResults[static_cast<size_t>(row)];
+        if (std::isfinite(wsum) && wsum > std::numeric_limits<float>::epsilon())
         {
-            _lambdaResults.row(row) /= _wsumResults[static_cast<size_t>(row)];
+            _lambdaResults.row(row) /= wsum;
+        }
+        else
+        {
+            _lambdaResults.row(row).setZero();
         }
     }
     return _lambdaResults;
@@ -389,8 +395,20 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
                 const float b0 = colors[colorBase + 0];
                 const float b1 = colors[colorBase + 1];
                 const float b2 = colors[colorBase + 2];
+                const float triangleSample = colors[colorBase + 3];
 
-                const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * float(numTriangles) + 0.5f);
+                if (!std::isfinite(b0) || !std::isfinite(b1) || !std::isfinite(b2) || !std::isfinite(triangleSample))
+                {
+                    continue;
+                }
+
+                constexpr float kBaryEpsilon = 1e-4f;
+                if (b0 < -kBaryEpsilon || b1 < -kBaryEpsilon || b2 < -kBaryEpsilon)
+                {
+                    continue;
+                }
+
+                const uint32_t tri = static_cast<uint32_t>(triangleSample * float(numTriangles) + 0.5f);
                 if (tri >= numTriangles)
                 {
                     continue;
@@ -398,6 +416,11 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
                 float w = _solidAngles[texelIdx];
                 if (!_offset) {
                     const float depth = DecodeDepthSample(depthBytes + texelIdx * _depthBytesPerTexel);
+                    if (!std::isfinite(depth))
+                    {
+                        continue;
+                    }
+
                     if (depth >= 0.999999f) //kdepthepsilon
                     {
                         continue;
