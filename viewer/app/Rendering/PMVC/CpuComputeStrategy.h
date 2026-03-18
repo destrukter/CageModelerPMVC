@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 
+#include <Eigen/Core>
 #include <Rendering/PMVC/IComputeStrategy.h>
 #include <Rendering/Core/Buffer.h>
 #include <Rendering/Core/DescriptorPool.h>
@@ -52,6 +53,8 @@ public:
     Eigen::MatrixXd Readback();
 
 private:
+    using RowMajorMatrixXd = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
     struct SlotReadback
     {
         VkBuffer colorBuffer = VK_NULL_HANDLE;
@@ -67,7 +70,8 @@ private:
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
     float ComputeSolidAngle(uint32_t texelX, uint32_t texelY) const;
-    float DecodeDepthSample(const uint8_t* texel) const;
+    template <bool UseOffset>
+    void ComputeOnCpuImpl(uint32_t deformableIndex, const SlotReadback& slot);
     void ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot);
 
     RenderResourceRef<Device> _device;
@@ -81,12 +85,19 @@ private:
     VkCommandPool _computeCommandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> _computeCommandBuffers = {};
 
+    struct TriangleVertices
+    {
+        uint32_t i0;
+        uint32_t i1;
+        uint32_t i2;
+    };
+
     Buffer _vertexListBuffer;
-    std::vector<uint32_t> _vertexList;
+    std::vector<TriangleVertices> _triangleVertices;
     std::vector<float> _solidAngles;
 
-    Eigen::MatrixXd _lambdaResults;
-    std::vector<float> _wsumResults;
+    RowMajorMatrixXd _lambdaResults;
+    std::vector<double> _wsumResults;
 
     EigenMesh& _cageMesh;
     EigenMesh& _deformableMesh;
@@ -103,4 +114,5 @@ private:
     bool _offset = false;
 
     uint32_t _maxTargetCount = 64;
+    size_t _texelCount = 0;
 };

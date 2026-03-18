@@ -29,8 +29,9 @@ void CpuComputeStrategy::Initialize()
 
     _depthFormat = _device->FindDepthFormat();
     _depthBytesPerTexel = (_depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) ? sizeof(uint32_t) : sizeof(float);
+    _texelCount = static_cast<size_t>(_faceSize) * _faceSize * 6;
 
-    _solidAngles.resize(static_cast<size_t>(_faceSize) * _faceSize * 6);
+    _solidAngles.resize(_texelCount);
     for (uint32_t face = 0; face < 6; ++face)
     {
         for (uint32_t y = 0; y < _faceSize; ++y)
@@ -141,12 +142,14 @@ void CpuComputeStrategy::AllocateResources()
     }
 
     const int triCount = _cageMesh._faces.rows();
-    _vertexList.resize(triCount * 3);
+    _triangleVertices.resize(static_cast<size_t>(triCount));
     for (int t = 0; t < triCount; ++t)
     {
-        _vertexList[t * 3 + 0] = static_cast<uint32_t>(_cageMesh._faces(t, 0));
-        _vertexList[t * 3 + 1] = static_cast<uint32_t>(_cageMesh._faces(t, 1));
-        _vertexList[t * 3 + 2] = static_cast<uint32_t>(_cageMesh._faces(t, 2));
+        _triangleVertices[static_cast<size_t>(t)] = TriangleVertices{
+            static_cast<uint32_t>(_cageMesh._faces(t, 0)),
+            static_cast<uint32_t>(_cageMesh._faces(t, 1)),
+            static_cast<uint32_t>(_cageMesh._faces(t, 2))
+        };
     }
 
     /*
@@ -298,20 +301,34 @@ void CpuComputeStrategy::SubmitAllReadbacks(
 
 void CpuComputeStrategy::ConsumeAllSlots()
 {
-    std::vector<std::future<void>> tasks;
-    tasks.reserve(_slots.size());
-
+    std::vector<size_t> activeSlots;
+    activeSlots.reserve(_slots.size());
     for (size_t slot = 0; slot < _slots.size(); ++slot)
     {
-        const uint32_t deformableIndex = _slotToDeformableIndex[slot];
-        if (deformableIndex == UINT32_MAX)
+        if (_slotToDeformableIndex[slot] != UINT32_MAX)
         {
-            continue;
+            activeSlots.push_back(slot);
         }
+    }
 
-        tasks.emplace_back(_threadPool->Submit([this, deformableIndex, slot]()
+    if (activeSlots.empty())
+    {
+        return;
+    }
+
+    const size_t taskCount = std::min(activeSlots.size(), static_cast<size_t>(_cpuWorkerCount));
+    std::vector<std::future<void>> tasks;
+    tasks.reserve(taskCount);
+
+    for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+    {
+        tasks.emplace_back(_threadPool->Submit([this, &activeSlots, taskIndex, taskCount]()
         {
-            ComputeOnCpu(deformableIndex, _slots[slot]);
+            for (size_t activeIndex = taskIndex; activeIndex < activeSlots.size(); activeIndex += taskCount)
+            {
+                const size_t slot = activeSlots[activeIndex];
+                ComputeOnCpu(_slotToDeformableIndex[slot], _slots[slot]);
+            }
         }));
     }
 
@@ -348,83 +365,115 @@ float CpuComputeStrategy::ComputeSolidAngle(uint32_t texelX, uint32_t texelY) co
     return AreaElement(x0, y0) - AreaElement(x0, y1) - AreaElement(x1, y0) + AreaElement(x1, y1);
 }
 
-float CpuComputeStrategy::DecodeDepthSample(const uint8_t* texel) const
+void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot)
 {
-    switch (_depthFormat)
+    if (_offset)
     {
-    case VK_FORMAT_D32_SFLOAT:
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-        return *reinterpret_cast<const float*>(texel);
-    case VK_FORMAT_D24_UNORM_S8_UINT:
-    {
-        const uint32_t packed = *reinterpret_cast<const uint32_t*>(texel);
-        const uint32_t depth24 = packed & 0x00FFFFFFu;
-        return static_cast<float>(depth24) / 16777215.0f;
+        ComputeOnCpuImpl<true>(deformableIndex, slot);
+        return;
     }
-    default:
-        return 1.0f;
-    }
+
+    ComputeOnCpuImpl<false>(deformableIndex, slot);
 }
 
-void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot)
+template <bool UseOffset>
+void CpuComputeStrategy::ComputeOnCpuImpl(uint32_t deformableIndex, const SlotReadback& slot)
 {
     const float* colors = reinterpret_cast<const float*>(slot.colorMapped);
     const uint8_t* depthBytes = reinterpret_cast<const uint8_t*>(slot.depthMapped);
+    const uint32_t numTriangles = static_cast<uint32_t>(_triangleVertices.size());
+    const size_t lambdaCount = static_cast<size_t>(_lambdaResults.cols());
 
-    std::vector<float> lambda(static_cast<size_t>(_cageMesh._vertices.rows()), 0.0f);
-    float wsum = 0.0f;
+    double* const lambda = _lambdaResults.data() + static_cast<size_t>(deformableIndex) * lambdaCount;
+    std::fill_n(lambda, lambdaCount, 0.0);
 
-    const uint32_t numTriangles = static_cast<uint32_t>(_cageMesh._faces.rows());
-    const size_t texelCountPerFace = static_cast<size_t>(_faceSize) * _faceSize;
+    double wsum = 0.0;
 
-    for (uint32_t face = 0; face < 6; ++face)
+    if constexpr (UseOffset)
     {
-        for (uint32_t y = 0; y < _faceSize; ++y)
+        for (size_t texelIdx = 0; texelIdx < _texelCount; ++texelIdx)
         {
-            for (uint32_t x = 0; x < _faceSize; ++x)
+            const size_t colorBase = texelIdx * 4;
+            const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * static_cast<float>(numTriangles) + 0.5f);
+            if (tri >= numTriangles)
             {
-                const size_t texelIdx = static_cast<size_t>(face) * texelCountPerFace + static_cast<size_t>(y) * _faceSize + x;
-                const size_t colorBase = texelIdx * 4;
-
-                const float b0 = colors[colorBase + 0];
-                const float b1 = colors[colorBase + 1];
-                const float b2 = colors[colorBase + 2];
-
-                const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * float(numTriangles) + 0.5f);
-                if (tri >= numTriangles)
-                {
-                    continue;
-                }
-                float w = _solidAngles[texelIdx];
-                if (!_offset) {
-                    const float depth = DecodeDepthSample(depthBytes + texelIdx * _depthBytesPerTexel);
-                    if (depth >= 0.999999f) //kdepthepsilon
-                    {
-                        continue;
-                    }
-
-                    w *= (1.0f - depth);
-                }
-                if (w <= 0.0f)
-                {
-                    continue;
-                }
-
-                const uint32_t i0 = _vertexList[tri * 3 + 0];
-                const uint32_t i1 = _vertexList[tri * 3 + 1];
-                const uint32_t i2 = _vertexList[tri * 3 + 2];
-
-                lambda[i0] += b0 * w;
-                lambda[i1] += b1 * w;
-                lambda[i2] += b2 * w;
-                wsum += w;
+                continue;
             }
+
+            const double w = static_cast<double>(_solidAngles[texelIdx]);
+            if (w <= 0.0)
+            {
+                continue;
+            }
+
+            const TriangleVertices& triangle = _triangleVertices[tri];
+            lambda[triangle.i0] += static_cast<double>(colors[colorBase + 0]) * w;
+            lambda[triangle.i1] += static_cast<double>(colors[colorBase + 1]) * w;
+            lambda[triangle.i2] += static_cast<double>(colors[colorBase + 2]) * w;
+            wsum += w;
+        }
+    }
+    else if (_depthFormat == VK_FORMAT_D24_UNORM_S8_UINT)
+    {
+        for (size_t texelIdx = 0; texelIdx < _texelCount; ++texelIdx)
+        {
+            const size_t colorBase = texelIdx * 4;
+            const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * static_cast<float>(numTriangles) + 0.5f);
+            if (tri >= numTriangles)
+            {
+                continue;
+            }
+
+            const uint32_t packedDepth = *reinterpret_cast<const uint32_t*>(depthBytes + texelIdx * sizeof(uint32_t));
+            const float depth = static_cast<float>(packedDepth & 0x00FFFFFFu) * (1.0f / 16777215.0f);
+            if (depth >= 0.999999f)
+            {
+                continue;
+            }
+
+            const double w = static_cast<double>(_solidAngles[texelIdx]) * static_cast<double>(1.0f - depth);
+            if (w <= 0.0)
+            {
+                continue;
+            }
+
+            const TriangleVertices& triangle = _triangleVertices[tri];
+            lambda[triangle.i0] += static_cast<double>(colors[colorBase + 0]) * w;
+            lambda[triangle.i1] += static_cast<double>(colors[colorBase + 1]) * w;
+            lambda[triangle.i2] += static_cast<double>(colors[colorBase + 2]) * w;
+            wsum += w;
+        }
+    }
+    else
+    {
+        for (size_t texelIdx = 0; texelIdx < _texelCount; ++texelIdx)
+        {
+            const size_t colorBase = texelIdx * 4;
+            const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * static_cast<float>(numTriangles) + 0.5f);
+            if (tri >= numTriangles)
+            {
+                continue;
+            }
+
+            const float depth = *reinterpret_cast<const float*>(depthBytes + texelIdx * sizeof(float));
+            if (depth >= 0.999999f)
+            {
+                continue;
+            }
+
+            const double w = static_cast<double>(_solidAngles[texelIdx]) * static_cast<double>(1.0f - depth);
+            if (w <= 0.0)
+            {
+                continue;
+            }
+
+            const TriangleVertices& triangle = _triangleVertices[tri];
+            lambda[triangle.i0] += static_cast<double>(colors[colorBase + 0]) * w;
+            lambda[triangle.i1] += static_cast<double>(colors[colorBase + 1]) * w;
+            lambda[triangle.i2] += static_cast<double>(colors[colorBase + 2]) * w;
+            wsum += w;
         }
     }
 
-    for (size_t c = 0; c < lambda.size(); ++c)
-    {
-        _lambdaResults(deformableIndex, static_cast<Eigen::Index>(c)) = lambda[c];
-    }
     _wsumResults[deformableIndex] = wsum;
 }
