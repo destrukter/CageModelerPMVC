@@ -27,8 +27,7 @@ void CpuComputeStrategy::Initialize()
     _lambdaResults.setZero();
     _wsumResults.assign(_deformableMesh._vertices.rows(), 0.0f);
 
-    _depthFormat = _device->FindDepthFormat();
-    _depthBytesPerTexel = (_depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) ? sizeof(uint32_t) : sizeof(float);
+    _depthBytesPerTexel = 4 * sizeof(float);
 
     _solidAngles.resize(static_cast<size_t>(_faceSize) * _faceSize * 6);
     for (uint32_t face = 0; face < 6; ++face)
@@ -128,25 +127,25 @@ void CpuComputeStrategy::AllocateResources()
         _slots[i].colorMemory = color._deviceMemory;
         _slots[i].colorMapped = color._mappedData;
 
-        if (!_offset) {
-            auto depth = _resourceManager->CreateBufferAndMapMemory(
-                std::span<std::byte>((std::byte*)nullptr, depthSize),
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        auto depth = _resourceManager->CreateBufferAndMapMemory(
+            std::span<std::byte>((std::byte*)nullptr, depthSize),
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-            _slots[i].depthBuffer = depth._deviceBuffer;
-            _slots[i].depthMemory = depth._deviceMemory;
-            _slots[i].depthMapped = depth._mappedData;
-        }
+        _slots[i].depthBuffer = depth._deviceBuffer;
+        _slots[i].depthMemory = depth._deviceMemory;
+        _slots[i].depthMapped = depth._mappedData;
     }
 
-    const int triCount = _cageMesh._faces.rows();
-    _vertexList.resize(triCount * 3);
-    for (int t = 0; t < triCount; ++t)
+    const int primitiveCount = _cageMesh._faces.rows();
+    const int verticesPerPrimitive = _cageMesh._faces.cols() >= 4 ? 4 : 3;
+    _vertexList.resize(static_cast<size_t>(primitiveCount) * verticesPerPrimitive);
+    for (int primitive = 0; primitive < primitiveCount; ++primitive)
     {
-        _vertexList[t * 3 + 0] = static_cast<uint32_t>(_cageMesh._faces(t, 0));
-        _vertexList[t * 3 + 1] = static_cast<uint32_t>(_cageMesh._faces(t, 1));
-        _vertexList[t * 3 + 2] = static_cast<uint32_t>(_cageMesh._faces(t, 2));
+        for (int v = 0; v < verticesPerPrimitive; ++v)
+        {
+            _vertexList[primitive * verticesPerPrimitive + v] = static_cast<uint32_t>(_cageMesh._faces(primitive, v));
+        }
     }
 
     /*
@@ -211,13 +210,11 @@ void CpuComputeStrategy::RecordReadback(
         colorRegions[face].imageSubresource.layerCount = 1;
         colorRegions[face].imageExtent = { _faceSize, _faceSize, 1 };
 
-        if (!_offset) {
-            depthRegions[face].bufferOffset = depthFaceSize * face;
-            depthRegions[face].imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            depthRegions[face].imageSubresource.baseArrayLayer = face;
-            depthRegions[face].imageSubresource.layerCount = 1;
-            depthRegions[face].imageExtent = { _faceSize, _faceSize, 1 };
-        }
+        depthRegions[face].bufferOffset = depthFaceSize * face;
+        depthRegions[face].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        depthRegions[face].imageSubresource.baseArrayLayer = face;
+        depthRegions[face].imageSubresource.layerCount = 1;
+        depthRegions[face].imageExtent = { _faceSize, _faceSize, 1 };
     }
 
     vkCmdCopyImageToBuffer(
@@ -228,15 +225,13 @@ void CpuComputeStrategy::RecordReadback(
         static_cast<uint32_t>(colorRegions.size()),
         colorRegions.data());
 
-    if (!_offset) {
-        vkCmdCopyImageToBuffer(
-            cmd,
-            target.depthImage,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            _slots[slot].depthBuffer,
-            static_cast<uint32_t>(depthRegions.size()),
-            depthRegions.data());
-    }
+    vkCmdCopyImageToBuffer(
+        cmd,
+        target.depthImage,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        _slots[slot].depthBuffer,
+        static_cast<uint32_t>(depthRegions.size()),
+        depthRegions.data());
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 }
@@ -348,33 +343,26 @@ float CpuComputeStrategy::ComputeSolidAngle(uint32_t texelX, uint32_t texelY) co
     return AreaElement(x0, y0) - AreaElement(x0, y1) - AreaElement(x1, y0) + AreaElement(x1, y1);
 }
 
-float CpuComputeStrategy::DecodeDepthSample(const uint8_t* texel) const
+float CpuComputeStrategy::DecodeDepthSample(const float* texel) const
 {
-    switch (_depthFormat)
-    {
-    case VK_FORMAT_D32_SFLOAT:
-    case VK_FORMAT_D32_SFLOAT_S8_UINT:
-        return *reinterpret_cast<const float*>(texel);
-    case VK_FORMAT_D24_UNORM_S8_UINT:
-    {
-        const uint32_t packed = *reinterpret_cast<const uint32_t*>(texel);
-        const uint32_t depth24 = packed & 0x00FFFFFFu;
-        return static_cast<float>(depth24) / 16777215.0f;
-    }
-    default:
-        return 1.0f;
-    }
+    return texel[0];
+}
+
+uint32_t CpuComputeStrategy::DecodePrimitiveSample(const float* texel) const
+{
+    return static_cast<uint32_t>(texel[3] * static_cast<float>(_cageMesh._faces.rows()) + 0.5f);
 }
 
 void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot)
 {
     const float* colors = reinterpret_cast<const float*>(slot.colorMapped);
-    const uint8_t* depthBytes = reinterpret_cast<const uint8_t*>(slot.depthMapped);
+    const float* depthBytes = reinterpret_cast<const float*>(slot.depthMapped);
 
     std::vector<float> lambda(static_cast<size_t>(_cageMesh._vertices.rows()), 0.0f);
     float wsum = 0.0f;
 
-    const uint32_t numTriangles = static_cast<uint32_t>(_cageMesh._faces.rows());
+    const uint32_t numPrimitives = static_cast<uint32_t>(_cageMesh._faces.rows());
+    const uint32_t verticesPerPrimitive = _cageMesh._faces.cols() >= 4 ? 4u : 3u;
     const size_t texelCountPerFace = static_cast<size_t>(_faceSize) * _faceSize;
 
     for (uint32_t face = 0; face < 6; ++face)
@@ -390,14 +378,14 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
                 const float b1 = colors[colorBase + 1];
                 const float b2 = colors[colorBase + 2];
 
-                const uint32_t tri = static_cast<uint32_t>(colors[colorBase + 3] * float(numTriangles) + 0.5f);
-                if (tri >= numTriangles)
+                const uint32_t primitive = DecodePrimitiveSample(depthBytes + colorBase);
+                if (primitive >= numPrimitives)
                 {
                     continue;
                 }
                 float w = _solidAngles[texelIdx];
                 if (!_offset) {
-                    const float depth = DecodeDepthSample(depthBytes + texelIdx * _depthBytesPerTexel);
+                    const float depth = DecodeDepthSample(depthBytes + colorBase);
                     if (depth >= 0.999999f) //kdepthepsilon
                     {
                         continue;
@@ -410,13 +398,20 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
                     continue;
                 }
 
-                const uint32_t i0 = _vertexList[tri * 3 + 0];
-                const uint32_t i1 = _vertexList[tri * 3 + 1];
-                const uint32_t i2 = _vertexList[tri * 3 + 2];
+                const uint32_t base = primitive * verticesPerPrimitive;
+                const uint32_t i0 = _vertexList[base + 0];
+                const uint32_t i1 = _vertexList[base + 1];
+                const uint32_t i2 = _vertexList[base + 2];
 
                 lambda[i0] += b0 * w;
                 lambda[i1] += b1 * w;
                 lambda[i2] += b2 * w;
+                if (verticesPerPrimitive == 4u)
+                {
+                    const float b3 = colors[colorBase + 3];
+                    const uint32_t i3 = _vertexList[base + 3];
+                    lambda[i3] += b3 * w;
+                }
                 wsum += w;
             }
         }

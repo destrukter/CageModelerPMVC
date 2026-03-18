@@ -332,7 +332,7 @@ namespace
 			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", projectIndex, project._coordinateType);
 			return false;
 		}
-		else if (*deformationType == DeformationType::PMVC && !ParsePMVCComputeType(project._pmvcComputeType).has_value())
+		else if (DeformationTypeHelpers::IsPMVC(*deformationType) && !ParsePMVCComputeType(project._pmvcComputeType).has_value())
 		{
 			LOG_WARN("Skipping project {} due to unsupported pmvcComputeType '{}'.", projectIndex, project._pmvcComputeType);
 			return false;
@@ -373,6 +373,7 @@ namespace
 			{ "qgc", DeformationType::QGC },
 			{ "somigliana", DeformationType::Somigliana },
 			{ "pmvc", DeformationType::PMVC },
+			{ "pmvcq", DeformationType::PMVCQ },
 			{ "raytracing", DeformationType::Raytracing }
 		};
 
@@ -627,12 +628,12 @@ void Editor::StartEvaluation()
 				std::nullopt,
 				std::nullopt,
 				std::nullopt,
-				(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
-				(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
-				(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcHitCount.value_or(3)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(3)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
 			continue;
 		}
 
@@ -693,12 +694,12 @@ void Editor::StartEvaluation()
 			stageTimings._deformationApplyMs,
 						meshVertexCount,
 			cageVertexCount,
-			(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcHitCount.value_or(3)) : std::nullopt,
-			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(3)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
@@ -1334,7 +1335,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 				std::scoped_lock lock(_evaluationTimingsMutex);
 				_latestEvaluationStageTimings._initMs = initMs + cubemapInitMs.value_or(0.0);
 				_latestEvaluationStageTimings._computeTotalMs = computeTotalMs;
-				if (projectData->_deformationType == DeformationType::PMVC &&
+				if (DeformationTypeHelpers::IsPMVC(projectData->_deformationType) &&
 					(projectData->_pmvcComputeType == PMVCComputeType::All || projectData->_pmvcComputeType == PMVCComputeType::Cpu))
 				{
 					_latestEvaluationStageTimings._renderMs = renderMs;

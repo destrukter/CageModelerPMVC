@@ -9,7 +9,8 @@ struct CubemapRenderTarget;
 
 struct ComputePushConstants {
     glm::ivec2 uFaceSize;
-    int uNumTriangles;
+    int uNumPrimitives;
+    int uVerticesPerPrimitive;
 };
 
 class ICubemapComputeStrategy

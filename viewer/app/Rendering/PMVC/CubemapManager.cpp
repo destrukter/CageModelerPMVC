@@ -89,31 +89,33 @@ VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer)
 	else
 		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
+	VkAttachmentDescription depthHistoryAttachment = colorAttachment;
+	depthHistoryAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = _device->FindDepthFormat();
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	if (!cpuTransfer)
-		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	else
-		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	VkAttachmentReference colorAttachmentRef{};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	std::array<VkAttachmentReference, 2> colorAttachmentRefs{};
+	colorAttachmentRefs[0].attachment = 0;
+	colorAttachmentRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	colorAttachmentRefs[1].attachment = 1;
+	colorAttachmentRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference depthAttachmentRef{};
-	depthAttachmentRef.attachment = 1;
+	depthAttachmentRef.attachment = 2;
 	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkSubpassDescription subpass{};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
+	subpass.colorAttachmentCount = static_cast<uint32_t>(colorAttachmentRefs.size());
+	subpass.pColorAttachments = colorAttachmentRefs.data();
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
 	VkSubpassDependency dependency{};
@@ -125,7 +127,7 @@ VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer)
 	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
 
-	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+	std::array<VkAttachmentDescription, 3> attachments = { colorAttachment, depthHistoryAttachment, depthAttachment };
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -200,6 +202,7 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, boo
 		VK_COLOR_COMPONENT_B_BIT |
 		VK_COLOR_COMPONENT_A_BIT;
 	colorBlendAttachment.blendEnable = VK_FALSE;
+	std::array<VkPipelineColorBlendAttachmentState, 2> colorBlendAttachments{ colorBlendAttachment, colorBlendAttachment };
 
 	// Depth/stencil state
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
@@ -246,7 +249,7 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, boo
 	// Build the pipeline
 	return _renderPipelineManager->BeginPipeline()
 		.SetRenderPass(renderPass)
-		.SetColorBlendAttachments(std::span(&colorBlendAttachment, 1))
+		.SetColorBlendAttachments(std::span(colorBlendAttachments))
 		.SetDepthStencilState(depthStencil)
 		.SetDescriptorSetLayouts(depthPeelPass ? std::span(descriptorSetLayouts) : std::span(descriptorSetLayouts.data(), size_t(1)))
 		.SetSubpassIndex(0)
@@ -265,15 +268,16 @@ void CubemapManager::CreateVertexBufferFromMesh()
 	const EigenMesh& geom = _cageMesh;
 	const auto& positions = geom._vertices;
 	const auto& faces = geom._faces;
+	const uint32_t verticesPerPrimitive = GetVerticesPerPrimitive();
 
 	std::vector<CubemapVertex> vertexData;
-	vertexData.reserve(faces.rows() * 3);
+	vertexData.reserve(static_cast<size_t>(faces.rows()) * verticesPerPrimitive);
 
-	for (int tri = 0; tri < faces.rows(); ++tri)
+	for (int primitive = 0; primitive < faces.rows(); ++primitive)
 	{
-		for (int v = 0; v < 3; ++v)
+		for (uint32_t v = 0; v < verticesPerPrimitive; ++v)
 		{
-			int idx = faces(tri, v);
+			int idx = faces(primitive, static_cast<int>(v));
 
 			glm::vec3 pos(
 				static_cast<float>(positions(idx, 0)),
@@ -283,8 +287,8 @@ void CubemapManager::CreateVertexBufferFromMesh()
 
 			vertexData.push_back({
 				pos,
-				static_cast<uint32_t>(tri), // triangle ID
-				static_cast<uint32_t>(v)    // local vertex ID (0,1,2)
+				static_cast<uint32_t>(primitive),
+				v
 				});
 		}
 	}
@@ -305,12 +309,31 @@ void CubemapManager::CreateIndexBufferFromMesh()
 	const EigenMesh& geom = _cageMesh;
 	const auto& faces = geom._faces;
 
-	// Each triangle has 3 unique vertices in the vertex buffer
-	const size_t vertexCount = faces.rows() * 3;
-
-	std::vector<uint32_t> indices(vertexCount);
-	for (uint32_t i = 0; i < vertexCount; ++i)
-		indices[i] = i;
+	const uint32_t verticesPerPrimitive = GetVerticesPerPrimitive();
+	std::vector<uint32_t> indices;
+	if (verticesPerPrimitive == 4)
+	{
+		indices.reserve(static_cast<size_t>(faces.rows()) * 6);
+		for (uint32_t primitive = 0; primitive < static_cast<uint32_t>(faces.rows()); ++primitive)
+		{
+			const uint32_t base = primitive * 4;
+			indices.push_back(base + 0);
+			indices.push_back(base + 1);
+			indices.push_back(base + 2);
+			indices.push_back(base + 0);
+			indices.push_back(base + 2);
+			indices.push_back(base + 3);
+		}
+	}
+	else
+	{
+		const size_t vertexCount = static_cast<size_t>(faces.rows()) * 3;
+		indices.resize(vertexCount);
+		for (uint32_t i = 0; i < vertexCount; ++i)
+		{
+			indices[i] = i;
+		}
+	}
 
 	_indexBuffer = _resourceManager->CreateBufferAndMapMemory(
 		std::span(indices),
@@ -442,6 +465,12 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 	if (vkCreateCommandPool(_device, &poolInfo, nullptr, &_graphicCommandPool) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create command pool!");
 	}
+}
+
+
+uint32_t CubemapManager::GetVerticesPerPrimitive() const
+{
+	return _cageMesh._faces.cols() >= 4 ? 4u : 3u;
 }
 
 MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(

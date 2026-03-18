@@ -153,6 +153,14 @@ void CubemapRenderInstance::Cleanup()
 					vkDestroyImageView(_device, view, nullptr);
 			}
 		}
+		for (const auto& depthStencilViewSet : target.depthStencilViews)
+		{
+			for (auto view : depthStencilViewSet)
+			{
+				if (view != VK_NULL_HANDLE)
+					vkDestroyImageView(_device, view, nullptr);
+			}
+		}
 
 		if (target.cubemapView != VK_NULL_HANDLE)
 			vkDestroyImageView(_device, target.cubemapView, nullptr);
@@ -177,6 +185,16 @@ void CubemapRenderInstance::Cleanup()
 		{
 			if (depthMemory != VK_NULL_HANDLE)
 				vkFreeMemory(_device, depthMemory, nullptr);
+		}
+		for (auto depthStencilImage : target.depthStencilImages)
+		{
+			if (depthStencilImage != VK_NULL_HANDLE)
+				vkDestroyImage(_device, depthStencilImage, nullptr);
+		}
+		for (auto depthStencilMemory : target.depthStencilMemories)
+		{
+			if (depthStencilMemory != VK_NULL_HANDLE)
+				vkFreeMemory(_device, depthStencilMemory, nullptr);
 		}
 	}
 
@@ -285,103 +303,75 @@ void CubemapRenderInstance::Initialize() {
 CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 {
 	CubemapRenderTarget target{};
-	//target.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	// ---------------------------------------------------------------------
-	// Create cubemap color image
-	// ---------------------------------------------------------------------
-	VkImageCreateInfo imageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-	imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.format = _format;
-	imageInfo.extent = { _cubemapSize, _cubemapSize, 1 };
-	imageInfo.mipLevels = 1;
-	imageInfo.arrayLayers = 6;
-	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageInfo.usage =
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-		VK_IMAGE_USAGE_SAMPLED_BIT |
-		VK_IMAGE_USAGE_STORAGE_BIT |
-		VK_IMAGE_USAGE_TRANSFER_SRC_BIT; //TODO: only added for debugging prints for image remove after done(needed for CPU compute?)
-	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	VK_CHECK(vkCreateImage(_device, &imageInfo, nullptr, &target.cubemapImage));
+	VkImageCreateInfo colorImageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	colorImageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+	colorImageInfo.imageType = VK_IMAGE_TYPE_2D;
+	colorImageInfo.format = _format;
+	colorImageInfo.extent = { _cubemapSize, _cubemapSize, 1 };
+	colorImageInfo.mipLevels = 1;
+	colorImageInfo.arrayLayers = 6;
+	colorImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorImageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	colorImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	colorImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VkMemoryRequirements memReq{};
-	vkGetImageMemoryRequirements(_device, target.cubemapImage, &memReq);
-
 	VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-	allocInfo.allocationSize = memReq.size;
-	allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-	VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.cubemapMemory));
-	VK_CHECK(vkBindImageMemory(_device, target.cubemapImage, target.cubemapMemory, 0));
-
-
-	/*VkCommandBufferAllocateInfo allocInfoCB{
-	.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-	.commandPool = _graphicCommandPool, // or graphics pool
-	.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-	.commandBufferCount = 1
+	auto createColorImage = [&](VkImage& image, VkDeviceMemory& memory)
+	{
+		VK_CHECK(vkCreateImage(_device, &colorImageInfo, nullptr, &image));
+		vkGetImageMemoryRequirements(_device, image, &memReq);
+		allocInfo.allocationSize = memReq.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &memory));
+		VK_CHECK(vkBindImageMemory(_device, image, memory, 0));
 	};
 
-	VkCommandBuffer cmd;
-	VK_CHECK(vkAllocateCommandBuffers(_device, &allocInfoCB, &cmd));
+	createColorImage(target.cubemapImage, target.cubemapMemory);
+	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
+	{
+		createColorImage(target.depthImages[pingPong], target.depthMemories[pingPong]);
+	}
 
-	VkCommandBufferBeginInfo beginInfo{
-	.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-	.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
-	};
-
-	VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
-	*/
-	// ---------------------------------------------------------------------
-	// Create per-face color views
-	// ---------------------------------------------------------------------
 	for (uint32_t face = 0; face < 6; ++face)
 	{
 		VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		viewInfo.image = target.cubemapImage;
 		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		viewInfo.format = _format;
 		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		viewInfo.subresourceRange.levelCount = 1;
-		viewInfo.subresourceRange.baseArrayLayer = face;
 		viewInfo.subresourceRange.layerCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = face;
 
+		viewInfo.image = target.cubemapImage;
 		VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.faceViews[face]));
+
+		for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
+		{
+			viewInfo.image = target.depthImages[pingPong];
+			VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[pingPong][face]));
+		}
 	}
 
-	// ---------------------------------------------------------------------
-	// Create cubemap view (for sampling)
-	// ---------------------------------------------------------------------
-	/*VkImageViewCreateInfo cubeViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-	cubeViewInfo.image = target.cubemapImage;
-	cubeViewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-	cubeViewInfo.format = _format;
-	cubeViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	cubeViewInfo.subresourceRange.levelCount = 1;
-	cubeViewInfo.subresourceRange.layerCount = 6;
+	VkImageViewCreateInfo arrayViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	arrayViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	arrayViewInfo.format = _format;
+	arrayViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	arrayViewInfo.subresourceRange.baseMipLevel = 0;
+	arrayViewInfo.subresourceRange.levelCount = 1;
+	arrayViewInfo.subresourceRange.baseArrayLayer = 0;
+	arrayViewInfo.subresourceRange.layerCount = 6;
+	arrayViewInfo.image = target.cubemapImage;
+	VK_CHECK(vkCreateImageView(_device, &arrayViewInfo, nullptr, &target.cubemapView));
+	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
+	{
+		arrayViewInfo.image = target.depthImages[pingPong];
+		VK_CHECK(vkCreateImageView(_device, &arrayViewInfo, nullptr, &target.depthViewsArray[pingPong]));
+	}
 
-	VK_CHECK(vkCreateImageView(_cubemapManager._device, &cubeViewInfo, nullptr, &target.cubemapView));*/
-	VkImageViewCreateInfo cubeViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-	cubeViewInfo.image = target.cubemapImage;
-	cubeViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	cubeViewInfo.format = _format;
-	cubeViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	cubeViewInfo.subresourceRange.baseMipLevel = 0;
-	cubeViewInfo.subresourceRange.levelCount = 1;
-	cubeViewInfo.subresourceRange.baseArrayLayer = 0;
-	cubeViewInfo.subresourceRange.layerCount = 6;
-
-	VK_CHECK(vkCreateImageView(_device, &cubeViewInfo, nullptr, &target.cubemapView));
-
-	// ---------------------------------------------------------------------
-	// Create depth images (ping-pong)
-	// ---------------------------------------------------------------------
 	VkFormat depthFormat = _device->FindDepthFormat();
-
 	VkImageCreateInfo depthInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	depthInfo.imageType = VK_IMAGE_TYPE_2D;
 	depthInfo.format = depthFormat;
@@ -390,44 +380,30 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	depthInfo.arrayLayers = 6;
 	depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-		VK_IMAGE_USAGE_SAMPLED_BIT |
-		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
 	{
-		VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImages[pingPong]));
-
-		vkGetImageMemoryRequirements(_device, target.depthImages[pingPong], &memReq);
+		VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthStencilImages[pingPong]));
+		vkGetImageMemoryRequirements(_device, target.depthStencilImages[pingPong], &memReq);
 		allocInfo.allocationSize = memReq.size;
 		allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-		VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.depthMemories[pingPong]));
-		VK_CHECK(vkBindImageMemory(_device, target.depthImages[pingPong], target.depthMemories[pingPong], 0));
+		VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.depthStencilMemories[pingPong]));
+		VK_CHECK(vkBindImageMemory(_device, target.depthStencilImages[pingPong], target.depthStencilMemories[pingPong], 0));
 
 		for (uint32_t face = 0; face < 6; ++face)
 		{
 			VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-			viewInfo.image = target.depthImages[pingPong];
+			viewInfo.image = target.depthStencilImages[pingPong];
 			viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 			viewInfo.format = depthFormat;
 			viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 			viewInfo.subresourceRange.levelCount = 1;
 			viewInfo.subresourceRange.baseArrayLayer = face;
 			viewInfo.subresourceRange.layerCount = 1;
-			VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[pingPong][face]));
+			VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthStencilViews[pingPong][face]));
 		}
-
-		VkImageViewCreateInfo depthViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		depthViewInfo.image = target.depthImages[pingPong];
-		depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		depthViewInfo.format = depthFormat;
-		depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		depthViewInfo.subresourceRange.baseMipLevel = 0;
-		depthViewInfo.subresourceRange.levelCount = 1;
-		depthViewInfo.subresourceRange.baseArrayLayer = 0;
-		depthViewInfo.subresourceRange.layerCount = 6;
-		VK_CHECK(vkCreateImageView(_device, &depthViewInfo, nullptr, &target.depthViewsArray[pingPong]));
 	}
 
 	std::array<VkDescriptorSetLayout, 2> depthLayouts{
@@ -446,7 +422,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VkDescriptorImageInfo imageInfo{};
 		imageInfo.sampler = _depthHistorySampler;
 		imageInfo.imageView = target.depthViewsArray[historyIndex];
-		imageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 		VkWriteDescriptorSet write{};
 		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -466,14 +442,15 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	{
 		for (uint32_t face = 0; face < 6; ++face)
 		{
-			VkImageView attachments[2] = {
+			VkImageView attachments[3] = {
 				target.faceViews[face],
-				target.depthViews[pingPong][face]
+				target.depthViews[pingPong][face],
+				target.depthStencilViews[pingPong][face]
 			};
 
 			VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
 			fbInfo.renderPass = (_computeType == PMVCComputeType::Cpu) ? _renderPassCpu : _renderPass;
-			fbInfo.attachmentCount = 2;
+			fbInfo.attachmentCount = 3;
 			fbInfo.pAttachments = attachments;
 			fbInfo.width = _cubemapSize;
 			fbInfo.height = _cubemapSize;
@@ -630,9 +607,10 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 {
 	assert(targetIndex < _cubemapRenderUnit.graphicsCmdPerTarget.size());
 
-	VkClearValue clearValues[2]{};
-	clearValues[0].color = { {0.f, 0.f, 0.f, 1.f} };
-	clearValues[1].depthStencil = { 1.f, 0 };
+	VkClearValue clearValues[3]{};
+	clearValues[0].color = { {0.f, 0.f, 0.f, 0.f} };
+	clearValues[1].color = { {1.f, 0.f, 0.f, 1.f} };
+	clearValues[2].depthStencil = { 1.f, 0 };
 
 	VkCommandBufferBeginInfo beginInfo{
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -652,11 +630,10 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	// ---------------------------------------------------------------------
 	// Update shared UBO (outside render loop)
 	// ---------------------------------------------------------------------
-	const uint32_t numTriangles =
-		static_cast<uint32_t>(_cageMesh._faces.size() / 3);
+	const uint32_t numPrimitives = static_cast<uint32_t>(_cageMesh._faces.rows());
 
 	CubemapMatricesUBO ubo{};
-	ubo.invNumTriangles = 1.0f / float(numTriangles);
+	ubo.invNumPrimitives = 1.0f / float(numPrimitives);
 	std::memcpy(
 		_cubemapRenderUnit.matricesUBO._mappedData,
 		&ubo,
@@ -694,7 +671,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			.renderPass = renderPass,
 			.framebuffer = target.framebuffers[hitIndex % 2][face],
 			.renderArea = {{0, 0}, {_cubemapSize, _cubemapSize}},
-			.clearValueCount = 2,
+			.clearValueCount = 3,
 			.pClearValues = clearValues
 		};
 
@@ -729,9 +706,12 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 				0, nullptr);
 		}
 
+		const uint32_t indexCount = (_cageMesh._faces.cols() >= 4)
+			? static_cast<uint32_t>(_cageMesh._faces.rows()) * 6u
+			: static_cast<uint32_t>(_cageMesh._faces.size());
 		vkCmdDrawIndexed(
 			cmd,
-			static_cast<uint32_t>(_cageMesh._faces.size()),
+			indexCount,
 			1, 0, 0, 0);
 
 		vkCmdEndRenderPass(cmd);

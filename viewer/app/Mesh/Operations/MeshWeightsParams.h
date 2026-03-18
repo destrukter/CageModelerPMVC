@@ -21,6 +21,7 @@ enum class DeformationType : uint8_t
 	QGC,
 	Somigliana,
 	PMVC,
+	PMVCQ,
 	Raytracing
 };
 
@@ -80,6 +81,9 @@ struct DeformationTypeHelpers
 		else if (deformationType == DeformationType::PMVC) {
 			return "PMVC";
 		}
+		else if (deformationType == DeformationType::PMVCQ) {
+			return "PMVCQ";
+		}
 		else if (deformationType == DeformationType::Raytracing)
 		{
 			return "Raytracing";
@@ -94,7 +98,7 @@ struct DeformationTypeHelpers
 	}
 	[[nodiscard]] static bool IsPMVC(const DeformationType deformationType)
 	{
-		return deformationType == DeformationType::PMVC;
+		return deformationType == DeformationType::PMVC || deformationType == DeformationType::PMVCQ;
 	}
 	[[nodiscard]] static bool CanInterpolateWeights(const DeformationType deformationType)
 	{

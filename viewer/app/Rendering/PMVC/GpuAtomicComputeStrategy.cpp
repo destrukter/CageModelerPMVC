@@ -181,7 +181,8 @@ void GpuAtomicComputeStrategy::DispatchAfterRender(
 	// Push constants
 	ComputePushConstants pc{};
 	pc.uFaceSize = { (int)_faceSize, (int)_faceSize };
-	pc.uNumTriangles = _cageMesh._faces.rows();
+	pc.uNumPrimitives = _cageMesh._faces.rows();
+	pc.uVerticesPerPrimitive = _cageMesh._faces.cols() >= 4 ? 4 : 3;
 
 	vkCmdPushConstants(
 		cmd,
@@ -556,14 +557,16 @@ void GpuAtomicComputeStrategy::AllocateResources()
 	// --------------------------------------------------
 	// Vertex index list buffer
 	// --------------------------------------------------
-	const int triCount = _cageMesh._faces.rows();
-	std::vector<uint32_t> vertexList(triCount * 3);
+	const int primitiveCount = _cageMesh._faces.rows();
+	const int verticesPerPrimitive = _cageMesh._faces.cols() >= 4 ? 4 : 3;
+	std::vector<uint32_t> vertexList(static_cast<size_t>(primitiveCount) * verticesPerPrimitive);
 
-	for (int t = 0; t < triCount; ++t)
+	for (int primitive = 0; primitive < primitiveCount; ++primitive)
 	{
-		vertexList[t * 3 + 0] = static_cast<uint32_t>(_cageMesh._faces(t, 0));
-		vertexList[t * 3 + 1] = static_cast<uint32_t>(_cageMesh._faces(t, 1));
-		vertexList[t * 3 + 2] = static_cast<uint32_t>(_cageMesh._faces(t, 2));
+		for (int v = 0; v < verticesPerPrimitive; ++v)
+		{
+			vertexList[primitive * verticesPerPrimitive + v] = static_cast<uint32_t>(_cageMesh._faces(primitive, v));
+		}
 	}
 
 	auto vertexListStaging = _resourceManager->CreateBufferAndCopy(
@@ -598,7 +601,7 @@ void GpuAtomicComputeStrategy::UpdateComputeDescriptorSet(uint32_t slotIndex, co
 	};
 
 	VkDescriptorImageInfo depthImageInfo{};
-	depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	depthImageInfo.imageView = target.depthView;  // You need to add this to CubemapRenderTarget
 	depthImageInfo.sampler = _depthSampler;
 

@@ -33,6 +33,9 @@ struct CubemapRenderTarget
 	std::array<VkDeviceMemory, 2> depthMemories{};
 	std::array<VkImageView, 2> depthViewsArray{};
 	std::array<std::array<VkImageView, 6>, 2> depthViews{};
+	std::array<VkImage, 2> depthStencilImages{};
+	std::array<VkDeviceMemory, 2> depthStencilMemories{};
+	std::array<std::array<VkImageView, 6>, 2> depthStencilViews{};
 	std::array<std::array<VkFramebuffer, 6>, 2> framebuffers{};
 	std::array<VkDescriptorSet, 2> depthHistoryDescriptorSets{};
 };
@@ -49,7 +52,7 @@ struct CubemapRenderUnit
 
 struct CubemapMatricesUBO
 {
-	float invNumTriangles;
+	float invNumPrimitives;
 	float _pad[3];
 };
 

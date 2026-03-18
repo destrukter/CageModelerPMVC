@@ -83,6 +83,7 @@ private:
 	float ComputeFarPlane(const glm::vec3& camPos, const std::vector<glm::vec3>& vertices);
 	//glm::mat4 ComputeCubemapViewMatrix(uint32_t faceIndex, const glm::vec3& pos);
 	std::vector<CubemapVertex> CreateCubemapVertexBuffer(const PolygonMesh& mesh);
+	[[nodiscard]] uint32_t GetVerticesPerPrimitive() const;
 
 	//resources:
 	RenderResourceRef<Device> _device;

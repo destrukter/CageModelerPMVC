@@ -67,7 +67,8 @@ private:
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
 
     float ComputeSolidAngle(uint32_t texelX, uint32_t texelY) const;
-    float DecodeDepthSample(const uint8_t* texel) const;
+    float DecodeDepthSample(const float* texel) const;
+    uint32_t DecodePrimitiveSample(const float* texel) const;
     void ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot);
 
     RenderResourceRef<Device> _device;
@@ -75,8 +76,7 @@ private:
     uint32_t _faceSize = 32;
     VkFormat _format = VK_FORMAT_R32G32B32A32_SFLOAT;
 
-    VkFormat _depthFormat = VK_FORMAT_D32_SFLOAT;
-    VkDeviceSize _depthBytesPerTexel = sizeof(float);
+    VkDeviceSize _depthBytesPerTexel = 4 * sizeof(float);
 
     VkCommandPool _computeCommandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> _computeCommandBuffers = {};
