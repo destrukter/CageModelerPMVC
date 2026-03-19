@@ -7,6 +7,7 @@
 #include <Mesh/ScreenPass.h>
 #include <Editor/Light.h>
 #include <cstddef>
+#include <Rendering/PMVC/CpuBatchedComputeStrategy.h>
 #include <Rendering/PMVC/CpuComputeStrategy.h>
 #include <Rendering/PMVC/GpuAtomicComputeStrategy.h>
 #include <Rendering/PMVC/CubemapManager.h>
@@ -23,6 +24,14 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+
+namespace
+{
+	bool UsesCpuReadbackRenderPass(const PMVCComputeType computeType)
+	{
+		return computeType == PMVCComputeType::Cpu || computeType == PMVCComputeType::CpuBatched;
+	}
+}
 
 CubemapRenderInstance::~CubemapRenderInstance() {
 	Cleanup();
@@ -239,6 +248,21 @@ void CubemapRenderInstance::Initialize() {
 	}
 	else if (_computeType == PMVCComputeType::Cpu) {
 		_computeStage = std::make_unique<CpuComputeStrategy>(
+			_device,
+			_device->GetQueueFamilies()._graphics.value(),
+			_cubemapSize,
+			_format,
+			_descriptorPool,
+			_resourceManager,
+			_renderPipelineManager,
+			_cageMesh,
+			_deformableMesh,
+			_pmvcUseOffset,
+			_targetCount
+		);
+	}
+	else if (_computeType == PMVCComputeType::CpuBatched) {
+		_computeStage = std::make_unique<CpuBatchedComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
 			_cubemapSize,
@@ -472,7 +496,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 			};
 
 			VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-			fbInfo.renderPass = (_computeType == PMVCComputeType::Cpu) ? _renderPassCpu : _renderPass;
+			fbInfo.renderPass = UsesCpuReadbackRenderPass(_computeType) ? _renderPassCpu : _renderPass;
 			fbInfo.attachmentCount = 2;
 			fbInfo.pAttachments = attachments;
 			fbInfo.width = _cubemapSize;
@@ -640,7 +664,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	};
 	
 	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
-	if (_computeType == PMVCComputeType::Cpu)
+	if (UsesCpuReadbackRenderPass(_computeType))
 		pipelineHandle = _cubemapPipelineHandleCpu;
 	else if (hitIndex > 0)
 		pipelineHandle = _cubemapPipelineHitHandle;
@@ -686,7 +710,7 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			&push);
 
 		VkRenderPass renderPass = _renderPass;
-		if (_computeType == PMVCComputeType::Cpu)
+		if (UsesCpuReadbackRenderPass(_computeType))
 			renderPass = _renderPassCpu;
 
 		VkRenderPassBeginInfo rpInfo{
@@ -1311,6 +1335,114 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	_computeTotalMs = renderAccumulatedMs + computeAccumulatedMs + transferAccumulatedMs;
 }
 
+void CubemapRenderInstance::ComputeCoordinatesCpuBatched(
+	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
+{
+	auto* computeStage = static_cast<CpuBatchedComputeStrategy*>(_computeStage.get());
+	const auto vertices = BuildDeformableVertexPositions();
+
+	const uint32_t end = std::min<uint32_t>(
+		range.first + range.count,
+		static_cast<uint32_t>(vertices.size())
+	);
+	const uint32_t cubemapCount = end - range.first;
+	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
+	double renderAccumulatedMs = 0.0;
+	double computeAccumulatedMs = 0.0;
+	double transferAccumulatedMs = 0.0;
+
+	if (cubemapCount == 0 || slotCount == 0)
+	{
+		weights = computeStage->Readback();
+		return;
+	}
+
+	VkSemaphore timeline = _timelines[0];
+	uint64_t& timelineValue = _slotDoneValue[0];
+
+	for (uint32_t batchStart = 0; batchStart < cubemapCount; batchStart += slotCount)
+	{
+		const uint32_t batchCount = std::min(slotCount, cubemapCount - batchStart);
+
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		}
+
+		for (uint32_t hit = 0; hit < _hitCount; ++hit)
+		{
+			std::vector<uint32_t> activeSlots;
+			activeSlots.reserve(batchCount);
+
+			const auto renderStart = std::chrono::steady_clock::now();
+			uint64_t renderDone = timelineValue;
+			for (uint32_t slot = 0; slot < batchCount; ++slot)
+			{
+				const uint32_t cubemapIdx = range.first + batchStart + slot;
+				CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+				activeSlots.push_back(slot);
+
+				renderDone = ++timelineValue;
+				RecordAndSubmitCubemapRender(
+					cubemapIdx,
+					slot,
+					vertices[cubemapIdx],
+					target,
+					timeline,
+					renderDone,
+					hit);
+
+				target.depthImage = target.depthImages[hit % 2];
+				target.depthMemory = target.depthMemories[hit % 2];
+				target.depthView = target.depthViewsArray[hit % 2];
+				computeStage->RecordReadback(slot, target, cubemapIdx);
+			}
+			const auto renderEnd = std::chrono::steady_clock::now();
+			renderAccumulatedMs += std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+
+			if (_omitNegative && ((hit + 1) % 2u == 0u))
+			{
+				continue;
+			}
+
+			const auto transferStart = std::chrono::steady_clock::now();
+			const uint64_t readbackDone = ++timelineValue;
+			computeStage->SubmitAllReadbacks(activeSlots, timeline, renderDone, timeline, readbackDone);
+
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &readbackDone;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+			const auto transferEnd = std::chrono::steady_clock::now();
+			transferAccumulatedMs += std::chrono::duration<double, std::milli>(transferEnd - transferStart).count();
+
+			timelineValue = readbackDone;
+
+			const auto computeStart = std::chrono::steady_clock::now();
+			computeStage->ConsumeAllSlots(activeSlots, hit);
+			const auto computeEnd = std::chrono::steady_clock::now();
+			computeAccumulatedMs += std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+		}
+	}
+
+	const auto readbackStart = std::chrono::steady_clock::now();
+	weights = computeStage->Readback();
+	const auto readbackEnd = std::chrono::steady_clock::now();
+	transferAccumulatedMs += std::chrono::duration<double, std::milli>(readbackEnd - readbackStart).count();
+
+	_renderMs = renderAccumulatedMs;
+	_computeMs = computeAccumulatedMs;
+	_transferMs = transferAccumulatedMs;
+	_computeTotalMs = renderAccumulatedMs + computeAccumulatedMs + transferAccumulatedMs;
+}
+
 void CubemapRenderInstance::ComputeCoordinates(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights) {
 	_renderMs.reset();
@@ -1328,5 +1460,8 @@ void CubemapRenderInstance::ComputeCoordinates(
 	}
 	else if (_computeType == PMVCComputeType::Cpu) {
 		ComputeCoordinatesCpu(range, weights);
+	}
+	else if (_computeType == PMVCComputeType::CpuBatched) {
+		ComputeCoordinatesCpuBatched(range, weights);
 	}
 }

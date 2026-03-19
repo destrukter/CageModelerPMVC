@@ -73,6 +73,7 @@ add_executable(${PROJECT_NAME}
     Rendering/PMVC/CubemapRenderInstance.cpp
     Rendering/PMVC/CubemapManager.cpp
     Rendering/PMVC/CpuComputeStrategy.cpp
+    Rendering/PMVC/CpuBatchedComputeStrategy.cpp
     Rendering/PMVC/GpuSerialComputeStrategy.h
     Rendering/PMVC/GpuAtomicComputeStrategy.cpp
     Rendering/PMVC/Raytracer.cpp

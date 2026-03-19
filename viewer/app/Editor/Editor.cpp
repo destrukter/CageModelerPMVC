@@ -97,6 +97,7 @@ namespace
 
 	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value);
 	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value);
+	[[nodiscard]] std::string PMVCComputeTypeToString(const PMVCComputeType value);
 	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key);
 
 	[[nodiscard]] std::string EscapeJsonString(const std::string& value)
@@ -390,7 +391,10 @@ namespace
 			{ "serial", PMVCComputeType::Serial },
 			{ "ring", PMVCComputeType::Ring },
 			{ "all", PMVCComputeType::All },
-			{ "cpu", PMVCComputeType::Cpu }
+			{ "cpu", PMVCComputeType::Cpu },
+			{ "cpubatched", PMVCComputeType::CpuBatched },
+			{ "cpu_batched", PMVCComputeType::CpuBatched },
+			{ "cpu-batched", PMVCComputeType::CpuBatched }
 		};
 		const auto it = mapping.find(ToLower(value));
 		if (it == mapping.end())
@@ -398,6 +402,25 @@ namespace
 			return std::nullopt;
 		}
 		return it->second;
+	}
+
+	[[nodiscard]] std::string PMVCComputeTypeToString(const PMVCComputeType value)
+	{
+		switch (value)
+		{
+		case PMVCComputeType::Serial:
+			return "serial";
+		case PMVCComputeType::Ring:
+			return "ring";
+		case PMVCComputeType::All:
+			return "all";
+		case PMVCComputeType::Cpu:
+			return "cpu";
+		case PMVCComputeType::CpuBatched:
+			return "cpu_batched";
+		}
+
+		return "all";
 	}
 }
 
@@ -627,7 +650,7 @@ void Editor::StartEvaluation()
 				std::nullopt,
 				std::nullopt,
 				std::nullopt,
-				(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+				(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(PMVCComputeTypeToString(_projectModel->_pmvcComputeType)) : std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
 				(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
@@ -693,7 +716,7 @@ void Editor::StartEvaluation()
 			stageTimings._deformationApplyMs,
 						meshVertexCount,
 			cageVertexCount,
-			(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
+			(*deformationType == DeformationType::PMVC) ? std::optional<std::string>(PMVCComputeTypeToString(_projectModel->_pmvcComputeType)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(*deformationType == DeformationType::PMVC) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
@@ -1335,7 +1358,9 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 				_latestEvaluationStageTimings._initMs = initMs + cubemapInitMs.value_or(0.0);
 				_latestEvaluationStageTimings._computeTotalMs = computeTotalMs;
 				if (projectData->_deformationType == DeformationType::PMVC &&
-					(projectData->_pmvcComputeType == PMVCComputeType::All || projectData->_pmvcComputeType == PMVCComputeType::Cpu))
+					(projectData->_pmvcComputeType == PMVCComputeType::All ||
+					 projectData->_pmvcComputeType == PMVCComputeType::Cpu ||
+					 projectData->_pmvcComputeType == PMVCComputeType::CpuBatched))
 				{
 					_latestEvaluationStageTimings._renderMs = renderMs;
 					_latestEvaluationStageTimings._computeMs = computeMs;

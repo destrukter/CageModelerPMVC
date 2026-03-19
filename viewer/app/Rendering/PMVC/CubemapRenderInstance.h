@@ -99,6 +99,9 @@ public:
 	void ComputeCoordinatesGPUMP(
 		const CubemapWorkRange& range,
 		Eigen::MatrixXd& weights);
+	void ComputeCoordinatesCpuBatched(
+		const CubemapWorkRange& range,
+		Eigen::MatrixXd& weights);
 	void ComputeCoordinates(const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 	[[nodiscard]] std::optional<double> GetRenderMs() const { return _renderMs; }
 	[[nodiscard]] std::optional<double> GetComputeMs() const { return _computeMs; }
