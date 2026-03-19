@@ -858,7 +858,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const auto totalStart = std::chrono::steady_clock::now();
 	auto waitStart = std::chrono::high_resolution_clock::now();
 	auto waitTemp = std::chrono::high_resolution_clock::now();
-	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
+	LOG_DEBUG("ComputeCoordinatesGPUMP (batched, active slots only)");
   
 	auto* computeStage = static_cast<GpuMPComputeStrategy*>(_computeStage.get());
 	const auto vertices = BuildDeformableVertexPositions();
@@ -897,12 +897,15 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 
 		for (uint32_t hit = 0; hit < _hitCount; ++hit)
 		{
+			std::vector<uint32_t> activeSlots;
+			activeSlots.reserve(batchCount);
 			const auto renderStart = std::chrono::steady_clock::now();
 			uint64_t renderDone = timelineValue;
 			for (uint32_t slot = 0; slot < batchCount; ++slot)
 			{
 				const uint32_t cubemapIdx = range.first + batchStart + slot;
 				CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+				activeSlots.push_back(slot);
 
 				renderDone = ++timelineValue;
 				RecordAndSubmitCubemapRender(
@@ -927,10 +930,10 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 
 			const auto computeStart = std::chrono::steady_clock::now();
 			const uint64_t computeDone = ++timelineValue;
-			computeStage->SubmitAllComputes(timeline, renderDone, timeline, computeDone);
+			computeStage->SubmitAllComputes(activeSlots, timeline, renderDone, timeline, computeDone);
 
 			const uint64_t copyDone = ++timelineValue;
-			computeStage->SubmitAllReadbackCopies(timeline, computeDone, timeline, copyDone);
+			computeStage->SubmitAllReadbackCopies(activeSlots, timeline, computeDone, timeline, copyDone);
 
 			VkSemaphoreWaitInfo waitInfo{};
 			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -941,7 +944,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 
 			timelineValue = copyDone;
 
-			computeStage->ConsumeAllSlots(hit);
+			computeStage->ConsumeAllSlots(activeSlots, hit);
 			
 			const auto computeEnd = std::chrono::steady_clock::now();
 			computeAccumulatedMs += std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
