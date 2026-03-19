@@ -881,17 +881,24 @@ void GpuMPComputeStrategy::RecordCompute(
 }
 
 void GpuMPComputeStrategy::SubmitAllComputes(
+	std::span<const uint32_t> activeSlots,
 	VkSemaphore waitSemaphore,
 	uint64_t waitValue,
 	VkSemaphore signalSemaphore,
 	uint64_t signalValue)
 {
-	std::vector<VkCommandBufferSubmitInfo> cmdInfos(_computeCommandBuffers.size());
-	for (size_t i = 0; i < _computeCommandBuffers.size(); ++i)
+	if (activeSlots.empty())
 	{
+		return;
+	}
+
+	std::vector<VkCommandBufferSubmitInfo> cmdInfos(activeSlots.size());
+	for (size_t i = 0; i < activeSlots.size(); ++i)
+	{
+		const uint32_t slot = activeSlots[i];
 		cmdInfos[i] = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-			.commandBuffer = _computeCommandBuffers[i]
+			.commandBuffer = _computeCommandBuffers[slot]
 		};
 	}
 
@@ -925,12 +932,18 @@ void GpuMPComputeStrategy::SubmitAllComputes(
 }
 
 void GpuMPComputeStrategy::SubmitAllReadbackCopies(
+	std::span<const uint32_t> activeSlots,
 	VkSemaphore waitSemaphore,
 	uint64_t waitValue,
 	VkSemaphore signalSemaphore,
 	uint64_t signalValue)
 {
-	for (uint32_t slot = 0; slot < _copyCommandBuffers.size(); ++slot)
+	if (activeSlots.empty())
+	{
+		return;
+	}
+
+	for (const uint32_t slot : activeSlots)
 	{
 		VkCommandBuffer cmd = _copyCommandBuffers[slot];
 		VK_CHECK(vkResetCommandBuffer(cmd, 0));
@@ -959,12 +972,13 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 		VK_CHECK(vkEndCommandBuffer(cmd));
 	}
 
-	std::vector<VkCommandBufferSubmitInfo> cmdInfos(_copyCommandBuffers.size());
-	for (size_t i = 0; i < _copyCommandBuffers.size(); ++i)
+	std::vector<VkCommandBufferSubmitInfo> cmdInfos(activeSlots.size());
+	for (size_t i = 0; i < activeSlots.size(); ++i)
 	{
+		const uint32_t slot = activeSlots[i];
 		cmdInfos[i] = {
 			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-			.commandBuffer = _copyCommandBuffers[i]
+			.commandBuffer = _copyCommandBuffers[slot]
 		};
 	}
 
@@ -997,11 +1011,11 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 	VK_CHECK(vkQueueSubmit2(queue, 1, &submit2, VK_NULL_HANDLE));
 }
 
-void GpuMPComputeStrategy::ConsumeAllSlots(uint64_t numPass)
+void GpuMPComputeStrategy::ConsumeAllSlots(std::span<const uint32_t> activeSlots, uint64_t numPass)
 {
 	const size_t C = _cageMesh._vertices.rows();
 
-	for (uint32_t slot = 0; slot < _slots.size(); ++slot)
+	for (const uint32_t slot : activeSlots)
 	{
 		const uint32_t deformableIndex = _slotToDeformableIndex[slot];
 		if (deformableIndex == UINT32_MAX)
@@ -1022,5 +1036,7 @@ void GpuMPComputeStrategy::ConsumeAllSlots(uint64_t numPass)
 			_wsumResults[deformableIndex] += wsum;
 		else if (numPass % 2 == 0)
 			_wsumResults[deformableIndex] -= wsum;
+
+		_slotToDeformableIndex[slot] = UINT32_MAX;
 	}
 }

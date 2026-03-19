@@ -9,6 +9,7 @@
 #include <Rendering/Core/RenderResourceManager.h>
 #include <Rendering/PMVC/CubemapRenderInstance.h>
 #include <Rendering/PMVC/SphereWeightCalculator.h>
+#include <span>
 
 //class SphereWeightCalculator;
 
@@ -75,18 +76,20 @@ public:
         uint32_t deformableIndex);
 
     void SubmitAllComputes(
+        std::span<const uint32_t> activeSlots,
         VkSemaphore waitSemaphore,
         uint64_t waitValue,
         VkSemaphore signalSemaphore,
         uint64_t signalValue);
 
     void SubmitAllReadbackCopies(
+        std::span<const uint32_t> activeSlots,
         VkSemaphore waitSemaphore,
         uint64_t waitValue,
         VkSemaphore signalSemaphore,
         uint64_t signalValue);
 
-    void ConsumeAllSlots(uint64_t numPass);
+    void ConsumeAllSlots(std::span<const uint32_t> activeSlots, uint64_t numPass);
 
 private:
     void CreatePipelineAndLayouts();
