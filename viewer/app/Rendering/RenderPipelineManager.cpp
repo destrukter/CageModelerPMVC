@@ -4,10 +4,12 @@
 #include <glm/mat4x4.hpp>
 
 RenderPipelineManager::RenderPipelineManager(const RenderResourceRef<Device>& device)
-	: _allocatedPipelines(MaximumNumberPipelines)
+	: _allocatedPipelines(InitialNumberPipelines)
+	, _pipelines(InitialNumberPipelines)
 	, _device(device)
 {
 	std::fill(_allocatedPipelines.begin(), _allocatedPipelines.end(), false);
+	std::fill(_pipelines.begin(), _pipelines.end(), PipelineObject());
 }
 
 RenderPipelineManager::~RenderPipelineManager()
@@ -32,6 +34,33 @@ VkShaderModule RenderPipelineManager::CreateShaderModule(const std::vector<char>
 	VK_CHECK(vkCreateShaderModule(_device, &createInfo, nullptr, &result));
 
 	return result;
+}
+
+void RenderPipelineManager::ReleasePipeline(PipelineHandle handle)
+{
+	if (!_device)
+	{
+		return;
+	}
+
+	const auto index = handle.GetIndex();
+	if (index >= _allocatedPipelines.size() || !_allocatedPipelines[index])
+	{
+		return;
+	}
+
+	const auto& pipeline = _pipelines[index];
+	if (pipeline._handle != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(_device, pipeline._handle, nullptr);
+	}
+	if (pipeline._pipelineLayout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(_device, pipeline._pipelineLayout, nullptr);
+	}
+
+	_allocatedPipelines[index] = false;
+	_pipelines[index] = PipelineObject();
 }
 
 void RenderPipelineManager::ReleaseResource()
@@ -260,7 +289,14 @@ PipelineHandle RenderPipelineManager::BuildGraphicsPipeline(const GraphicsPipeli
 	}
 
 	// Get the next free index and mark it as set.
-	const auto nextFreeIndex = std::find(_allocatedPipelines.begin(), _allocatedPipelines.end(), false) - _allocatedPipelines.begin();
+	const auto nextFreeIt = std::find(_allocatedPipelines.begin(), _allocatedPipelines.end(), false);
+	const auto nextFreeIndex = static_cast<std::size_t>(nextFreeIt - _allocatedPipelines.begin());
+	if (nextFreeIt == _allocatedPipelines.end())
+	{
+		_allocatedPipelines.push_back(false);
+		_pipelines.push_back(PipelineObject());
+	}
+
 	_allocatedPipelines[nextFreeIndex] = true;
 
 	// Set the value of the pipeline object.
@@ -315,7 +351,14 @@ PipelineHandle RenderPipelineManager::BuildComputePipeline(const ComputePipeline
 	vkDestroyShaderModule(_device, shaderModule, nullptr);
 
 	// store pipeline in manager
-	const auto nextFreeIndex = std::find(_allocatedPipelines.begin(), _allocatedPipelines.end(), false) - _allocatedPipelines.begin();
+	const auto nextFreeIt = std::find(_allocatedPipelines.begin(), _allocatedPipelines.end(), false);
+	const auto nextFreeIndex = static_cast<std::size_t>(nextFreeIt - _allocatedPipelines.begin());
+	if (nextFreeIt == _allocatedPipelines.end())
+	{
+		_allocatedPipelines.push_back(false);
+		_pipelines.push_back(PipelineObject());
+	}
+
 	_allocatedPipelines[nextFreeIndex] = true;
 	_pipelines[nextFreeIndex] = PipelineObject(pipeline, pipelineLayout);
 

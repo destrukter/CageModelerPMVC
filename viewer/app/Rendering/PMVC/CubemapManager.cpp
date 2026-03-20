@@ -1,6 +1,8 @@
 ﻿#include <Rendering/PMVC/CubemapManager.h>
 
 #include <Rendering/PMVC/CubemapRenderInstance.h>
+
+#include <chrono>
 #include <Rendering/Commands/RenderCommandScheduler.h>
 #include <Rendering/Core/RenderProxyCollector.h>
 #include <Rendering/Core/RenderResourceManager.h>
@@ -18,19 +20,57 @@ CubemapManager::CubemapManager(const std::shared_ptr<RenderPipelineManager>& ren
 
 CubemapManager::~CubemapManager()
 {
-	//TODO cleanup
+	Cleanup();
 }
 
-void CubemapManager::Initialize()
+void CubemapManager::Cleanup() {
+	if (!_device) return;
+	vkDeviceWaitIdle(_device);
+	if (_indexBuffer._deviceBuffer != VK_NULL_HANDLE) {
+		_indexBuffer.ReleaseResource(_device);
+		_indexBuffer = MemoryMappedBuffer();
+	}
+	if (_vertexBuffer._deviceBuffer != VK_NULL_HANDLE) {
+		_vertexBuffer.ReleaseResource(_device);
+		_vertexBuffer = MemoryMappedBuffer();
+	}
+	if (_renderPass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(_device, _renderPass, nullptr);
+		_renderPass = VK_NULL_HANDLE;
+	}
+	if (_renderPassCpu != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(_device, _renderPassCpu, nullptr);
+		_renderPassCpu = VK_NULL_HANDLE;
+	}
+	if (_graphicCommandPool != VK_NULL_HANDLE) {
+		vkDestroyCommandPool(_device, _graphicCommandPool, nullptr);
+		_graphicCommandPool = VK_NULL_HANDLE;
+	}
+}
+
+void CubemapManager::Initialize(uint32_t cubemapSize)
 {
-	_descriptorPool = CreateRenderResource<DescriptorPool>(_device);
-	CreateCommandPool(_device->GetQueueFamilies()._graphics.value());
-	_renderPass = CreateRenderPass(_format, false);
-	_renderPassCpu = CreateRenderPass(_format, true);
-	CreateDescriptorSetLayouts();
-	_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
-	_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
-	//SphereWeightInitialization(512);
+	if (!init) {
+		_descriptorPool = CreateRenderResource<DescriptorPool>(_device);
+		CreateCommandPool(_device->GetQueueFamilies()._graphics.value());
+		_renderPass = CreateRenderPass(_format, false);
+		_renderPassCpu = CreateRenderPass(_format, true);
+		CreateDescriptorSetLayouts();
+		_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
+		_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
+		_cubemapPipelineHitHandle = CreateCubemapRenderPipeline(false, true);
+		//SphereWeightInitialization(512);
+		init = true;
+	}
+	if(cubemapSize != _cubemapSize) {
+		_cubemapSize = cubemapSize;
+		_renderPipelineManager->ReleasePipeline(_cubemapPipelineHandle);
+		_renderPipelineManager->ReleasePipeline(_cubemapPipelineHandleCpu);
+		_renderPipelineManager->ReleasePipeline(_cubemapPipelineHitHandle);
+		_cubemapPipelineHandle = CreateCubemapRenderPipeline(false);
+		_cubemapPipelineHandleCpu = CreateCubemapRenderPipeline(true);
+		_cubemapPipelineHitHandle = CreateCubemapRenderPipeline(false, true);
+	}
 }
 
 VkRenderPass CubemapManager::CreateRenderPass(VkFormat format, bool cpuTransfer) {
@@ -111,9 +151,18 @@ void CubemapManager::CreateDescriptorSetLayouts() {
 	std::array<VkDescriptorSetLayoutBinding, 1> layoutBindings{ layoutBinding };
 
 	_matricesLayout = _descriptorPool->CreateDescriptorSetLayout(layoutBindings);
+
+	VkDescriptorSetLayoutBinding depthHistoryBinding{};
+	depthHistoryBinding.binding = 0;
+	depthHistoryBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	depthHistoryBinding.descriptorCount = 1;
+	depthHistoryBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	std::array<VkDescriptorSetLayoutBinding, 1> depthHistoryBindings{ depthHistoryBinding };
+	_depthHistoryLayout = _descriptorPool->CreateDescriptorSetLayout(depthHistoryBindings);
 }
 
-PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer)
+PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer, bool depthPeelPass)
 {
 	VkVertexInputBindingDescription bindingDesc{};
 	bindingDesc.binding = 0;
@@ -166,8 +215,10 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer)
 	msaa.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	msaa.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-	// Only the matrices layout is needed for cubemap rendering
-	std::array descriptorSetLayouts{ _matricesLayout->GetReference() };
+	std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts{
+		_matricesLayout->GetReference(),
+		depthPeelPass ? _depthHistoryLayout->GetReference() : VK_NULL_HANDLE
+	};
 
 	VkViewport viewport{};
 	viewport.x = 0.0f;
@@ -182,7 +233,7 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer)
 	scissor.extent = { _cubemapSize, _cubemapSize };
 
 	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
 	pushConstantRange.size = sizeof(CubemapPushConstants);
 
@@ -197,10 +248,10 @@ PipelineHandle CubemapManager::CreateCubemapRenderPipeline(bool cpuTransfer)
 		.SetRenderPass(renderPass)
 		.SetColorBlendAttachments(std::span(&colorBlendAttachment, 1))
 		.SetDepthStencilState(depthStencil)
-		.SetDescriptorSetLayouts(std::span(descriptorSetLayouts))
+		.SetDescriptorSetLayouts(depthPeelPass ? std::span(descriptorSetLayouts) : std::span(descriptorSetLayouts.data(), size_t(1)))
 		.SetSubpassIndex(0)
 		.SetShaderModule(ShaderModuleType::Vertex, "assets/shaders/Cubemap.vert.spv")
-		.SetShaderModule(ShaderModuleType::Fragment, "assets/shaders/Cubemap.frag.spv")
+		.SetShaderModule(ShaderModuleType::Fragment, depthPeelPass ? "assets/shaders/CubemapHit.frag.spv" : "assets/shaders/Cubemap.frag.spv")
 		.AddPushConstantRange(pushConstantRange)
 		.SetMultisampleState(msaa)
 		.SetViewportAndScissor(viewport, scissor)
@@ -393,23 +444,34 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 	}
 }
 
-MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(DeformationType deformationType) {
+MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(
+	PMVCComputeType computeType,
+	const bool useOffset,
+	const uint32_t targetCount,
+	const uint32_t hitCount,
+	const bool omitNegative) {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
 	assert(_resourceManager && "ResourceManager is null");
 	assert(_renderPipelineManager && "RenderPipelineManager is null");
 	assert(_matricesLayout && "MatricesLayout is null");
+	assert(_depthHistoryLayout && "DepthHistoryLayout is null");
 	CreateVertexBufferFromMesh();
 	CreateIndexBufferFromMesh();
 
 
 
 
+	const auto instanceInitStart = std::chrono::steady_clock::now();
 	CubemapRenderInstance instance(
 		*this,
 		_cubemapSize,
 		_format,
-		deformationType,
+		computeType,
+		useOffset,
+		targetCount,
+		hitCount,
+		omitNegative,
 
 		_device,
 		_descriptorPool,
@@ -424,12 +486,16 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		_renderPassCpu,
 		_cubemapPipelineHandle,
 		_cubemapPipelineHandleCpu,
+		_cubemapPipelineHitHandle,
 
 		_matricesLayout,
+		_depthHistoryLayout,
 
 		_indexBuffer,
 		_vertexBuffer
 	);
+	const auto instanceInitEnd = std::chrono::steady_clock::now();
+	const auto instanceInitMs = std::chrono::duration<double, std::milli>(instanceInitEnd - instanceInitStart).count();
 	CubemapWorkRange range{};
 	range.first = 0;
 	range.count = static_cast<uint32_t>(_deformableMesh._vertices.rows());
@@ -445,5 +511,10 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		std::move(interpolatedWeights),
 		std::move(psi),
 		std::move(psiTri),
-		std::move(psiQuad)};
+		std::move(psiQuad),
+		instance.GetRenderMs(),
+		instance.GetComputeMs(),
+		instance.GetComputeTotalMs(),
+		instance.GetTransferMs(),
+		instanceInitMs};
 }

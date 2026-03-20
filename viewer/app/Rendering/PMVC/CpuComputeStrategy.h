@@ -10,6 +10,7 @@
 #include <Rendering/Core/DescriptorPool.h>
 #include <Rendering/Core/RenderResourceManager.h>
 #include <Rendering/PMVC/CubemapRenderInstance.h>
+#include <Thread/ThreadPool.h>
 #include <Mesh/GeometryUtils.h>
 
 class CpuComputeStrategy final : public ICubemapComputeStrategy
@@ -25,7 +26,8 @@ public:
         const std::shared_ptr<RenderPipelineManager>& renderPipelineManager,
         EigenMesh& cageMesh,
         EigenMesh& deformableMesh,
-        bool offset)
+        bool offset,
+        uint32_t targetCount)
         : _device(device)
         , _transferQueueFamily(transferQueueFamily)
         , _faceSize(faceSize)
@@ -36,11 +38,13 @@ public:
         , _cageMesh(cageMesh)
         , _deformableMesh(deformableMesh)
         , _offset(offset)
+        , _maxTargetCount(targetCount == 0 ? 1u : targetCount)
     {
     }
 
     uint32_t RequiredRenderTargetCount() const override;
     void Initialize() override;
+    void Cleanup() override;
 
     void RecordReadback(uint32_t slot, const CubemapRenderTarget& target, uint32_t deformableIndex);
     void SubmitAllReadbacks(VkSemaphore waitSemaphore, uint64_t waitValue, VkSemaphore signalSemaphore, uint64_t signalValue);
@@ -94,5 +98,9 @@ private:
     int _targetCount = 0;
     std::vector<SlotReadback> _slots;
     std::vector<uint32_t> _slotToDeformableIndex;
+    std::unique_ptr<ThreadPool> _threadPool;
+    uint32_t _cpuWorkerCount = 1;
     bool _offset = false;
+
+    uint32_t _maxTargetCount = 64;
 };

@@ -4,7 +4,7 @@
 
 uint32_t GpuMPComputeStrategy::RequiredRenderTargetCount() const
 {
-	return static_cast<uint32_t>(_deformableMesh._vertices.rows());
+	return std::min<uint32_t>(static_cast<uint32_t>(_deformableMesh._vertices.rows()), static_cast<uint32_t>(_targetCount));
 }
 
 void GpuMPComputeStrategy::Initialize()
@@ -12,7 +12,7 @@ void GpuMPComputeStrategy::Initialize()
 	//_slotSync.resize(_targetCount);
 	// Prepare slots
 	//_slotDoneValue.resize(_targetCount, 0ull);
-	_targetCount = static_cast<int>(_deformableMesh._vertices.rows());
+	_targetCount = static_cast<int>(RequiredRenderTargetCount());
 	_slotToDeformableIndex.assign(_targetCount, UINT32_MAX);
 
 	_lambdaResults.resize(
@@ -58,6 +58,71 @@ void GpuMPComputeStrategy::Initialize()
 	CreateSampler();
 	CreateDepthSampler();
 }
+
+void GpuMPComputeStrategy::Cleanup()
+{
+	if (_computeCommandPool != VK_NULL_HANDLE)
+	{
+		if (!_computeCommandBuffers.empty())
+		{
+			vkFreeCommandBuffers(_device, _computeCommandPool, static_cast<uint32_t>(_computeCommandBuffers.size()), _computeCommandBuffers.data());
+			_computeCommandBuffers.clear();
+		}
+		if (!_copyCommandBuffers.empty())
+		{
+			vkFreeCommandBuffers(_device, _computeCommandPool, static_cast<uint32_t>(_copyCommandBuffers.size()), _copyCommandBuffers.data());
+			_copyCommandBuffers.clear();
+		}
+
+		vkDestroyCommandPool(_device, _computeCommandPool, nullptr);
+		_computeCommandPool = VK_NULL_HANDLE;
+	}
+
+	if (_barySampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(_device, _barySampler, nullptr);
+		_barySampler = VK_NULL_HANDLE;
+	}
+
+	if (_depthSampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(_device, _depthSampler, nullptr);
+		_depthSampler = VK_NULL_HANDLE;
+	}
+
+	if (_vertexListBuffer._deviceBuffer != VK_NULL_HANDLE)
+	{
+		_vertexListBuffer.ReleaseResource(_device);
+		_vertexListBuffer = Buffer();
+	}
+
+	for (auto& slot : _slots)
+	{
+		if (slot.lambda._deviceBuffer != VK_NULL_HANDLE)
+		{
+			slot.lambda.ReleaseResource(_device);
+			slot.lambda = Buffer();
+		}
+		if (slot.wsum._deviceBuffer != VK_NULL_HANDLE)
+		{
+			slot.wsum.ReleaseResource(_device);
+			slot.wsum = Buffer();
+		}
+		if (slot.lambdaStaging._deviceBuffer != VK_NULL_HANDLE)
+		{
+			slot.lambdaStaging.ReleaseResource(_device);
+			slot.lambdaStaging = MemoryMappedBuffer();
+		}
+		if (slot.wsumStaging._deviceBuffer != VK_NULL_HANDLE)
+		{
+			slot.wsumStaging.ReleaseResource(_device);
+			slot.wsumStaging = MemoryMappedBuffer();
+		}
+	}
+
+	_sphereWeightCalculator.Cleanup(_device);
+}
+
 
 //TODO maybe needs to be checked
 /*void GpuMPComputeStrategy::WaitForTargetReuse(VkSemaphore timeline, uint64_t slotDoneValue)
@@ -375,7 +440,6 @@ Eigen::MatrixXd GpuMPComputeStrategy::Readback()
 	for (int i = 0; i < _lambdaResults.rows(); ++i) {
 		_lambdaResults.row(i) /= _wsumResults[i];
 	}
-	//WriteWeightsToFile("GpuMPComputeStrategy_Readback.txt");
 	return _lambdaResults;
 }
 
@@ -595,7 +659,7 @@ void GpuMPComputeStrategy::CreateSampler() {
 	samplerInfo.maxLod = 0.0f;
 	samplerInfo.mipLodBias = 0.0f;
 
-	// Clamp (doesn’t really matter since texelFetch ignores addressing)
+	// Clamp (doesnÂ’t really matter since texelFetch ignores addressing)
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -932,9 +996,10 @@ void GpuMPComputeStrategy::SubmitAllReadbackCopies(
 	VK_CHECK(vkQueueSubmit2(queue, 1, &submit2, VK_NULL_HANDLE));
 }
 
-void GpuMPComputeStrategy::ConsumeAllSlots()
+void GpuMPComputeStrategy::ConsumeAllSlots(uint64_t numPass)
 {
 	const size_t C = _cageMesh._vertices.rows();
+	const bool isNegativePass = (numPass % 2u) == 1u;
 
 	for (uint32_t slot = 0; slot < _slots.size(); ++slot)
 	{
@@ -947,9 +1012,15 @@ void GpuMPComputeStrategy::ConsumeAllSlots()
 		const float wsum =
 			*(float*)_slots[slot].wsumStaging._mappedData;
 
-		for (size_t c = 0; c < C; ++c)
-			_lambdaResults(deformableIndex, c) = lambda[c];
-
-		_wsumResults[deformableIndex] = wsum;
+		for (size_t c = 0; c < C; ++c) {
+			if (isNegativePass)
+				_lambdaResults(deformableIndex, c) -= lambda[c];
+			else
+				_lambdaResults(deformableIndex, c) += lambda[c];
+		}
+		if (isNegativePass)
+			_wsumResults[deformableIndex] -= wsum;
+		else
+			_wsumResults[deformableIndex] += wsum;
 	}
 }

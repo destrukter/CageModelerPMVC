@@ -23,7 +23,8 @@ public:
         const std::shared_ptr<RenderPipelineManager>& renderPipelineManager,
         EigenMesh& cageMesh,
         EigenMesh& deformableMesh,
-        bool offset)
+        bool offset,
+        uint32_t targetCount)
         : _device(device)
         , _transferQueueFamily(transferQueueFamily)
         , _faceSize(faceSize)
@@ -34,12 +35,14 @@ public:
         , _cageMesh(cageMesh)
         , _deformableMesh(deformableMesh)
         , _offset(offset)
+        , _targetCount(targetCount == 0 ? 1u : static_cast<int>(targetCount))
     {
     }
 
     uint32_t RequiredRenderTargetCount() const override;
 
     void Initialize() override;
+    void Cleanup() override;
 
     void DispatchAfterRender(
         uint32_t deformableIndex,
@@ -115,7 +118,7 @@ private:
     void CopyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size);
     void WriteWeightsToFile(const std::string& filename);
 
-    int _targetCount = 1;
+    int _targetCount = 64;
 
 	bool _offset = false;
 

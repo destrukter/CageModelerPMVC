@@ -15,16 +15,28 @@
 #include <Rendering/PMVC/GpuSerialComputeStrategy.h>
 #include <Rendering/PMVC/GpuMassivelyParallelComputeStrategy.h>
 #include <Mesh/Operations/MeshWeightsParams.h>
+#include <Thread/ThreadPool.h>
+
+#include <algorithm>
+#include <exception>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 CubemapRenderInstance::~CubemapRenderInstance() {
-	//TODO: cleanup
+	Cleanup();
 }
 
 CubemapRenderInstance::CubemapRenderInstance()
 {
 	_cubemapSize = 32;
 	_format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	_deformationType = DeformationType::PMVCSerialNoOffset;
+	_computeType = PMVCComputeType::Serial;
+	_pmvcUseOffset = false;
+	_targetCount = 64;
+	_hitCount = 3;
+	_omitNegative = true;
 	Initialize();
 }
 
@@ -32,7 +44,11 @@ CubemapRenderInstance::CubemapRenderInstance(
 	CubemapManager& cubemapManager,
 	int cubemapSize,
 	VkFormat format,
-	DeformationType deformationType,
+	PMVCComputeType computeType,
+	bool useOffset,
+	uint32_t targetCount,
+	uint32_t hitCount,
+	bool omitNegative,
 
 	RenderResourceRef<Device> device,
 	RenderResourceRef<DescriptorPool> descriptorPool,
@@ -47,14 +63,20 @@ CubemapRenderInstance::CubemapRenderInstance(
 	VkRenderPass renderPassCpu,
 	PipelineHandle cubemapPipelineHandle,
 	PipelineHandle cubemapPipelineHandleCpu,
+	PipelineHandle cubemapPipelineHitHandle,
 
 	RenderResourceRef<DescriptorSetLayout> matricesLayout,
+	RenderResourceRef<DescriptorSetLayout> depthHistoryLayout,
 
 	MemoryMappedBuffer indexBuffer,
 	MemoryMappedBuffer vertexBuffer
 ): _cubemapSize(cubemapSize)
 , _format(format)
-, _deformationType(deformationType)
+, _computeType(computeType)
+, _pmvcUseOffset(useOffset)
+, _targetCount(targetCount == 0 ? 1u : targetCount)
+, _hitCount(hitCount == 0 ? 1u : hitCount)
+, _omitNegative(omitNegative)
 , _device(std::move(device))
 , _descriptorPool(std::move(descriptorPool))
 , _resourceManager(std::move(resourceManager))
@@ -65,7 +87,9 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _renderPass(renderPass)
 , _renderPassCpu(renderPassCpu)
 , _cubemapPipelineHandle(cubemapPipelineHandle)
+, _cubemapPipelineHitHandle(cubemapPipelineHitHandle)
 , _matricesLayout(std::move(matricesLayout))
+, _depthHistoryLayout(std::move(depthHistoryLayout))
 , _indexBuffer(std::move(indexBuffer))
 , _vertexBuffer(std::move(vertexBuffer))
 , _cubemapPipelineHandleCpu(cubemapPipelineHandleCpu)
@@ -73,10 +97,102 @@ CubemapRenderInstance::CubemapRenderInstance(
 	Initialize();
 }
 
-void CubemapRenderInstance::Initialize() {
-	_offset = DeformationTypeHelpers::PMVCOffset(_deformationType);
 
-	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
+void CubemapRenderInstance::Cleanup()
+{
+	if (!_device)
+		return;
+
+	vkDeviceWaitIdle(_device);
+
+	if (_computeStage)
+	{
+		_computeStage->Cleanup();
+		_computeStage.reset();
+	}
+
+	for (auto timeline : _timelines)
+	{
+		if (timeline != VK_NULL_HANDLE)
+			vkDestroySemaphore(_device, timeline, nullptr);
+	}
+	_timelines.clear();
+
+	if (_graphicCommandPool != VK_NULL_HANDLE)
+	{
+		vkDestroyCommandPool(_device, _graphicCommandPool, nullptr);
+		_graphicCommandPool = VK_NULL_HANDLE;
+	}
+
+	if (_cubemapRenderUnit.matricesUBO._deviceBuffer != VK_NULL_HANDLE)
+	{
+		_cubemapRenderUnit.matricesUBO.ReleaseResource(_device);
+		_cubemapRenderUnit.matricesUBO = MemoryMappedBuffer();
+	}
+
+	for (auto& target : _cubemapRenderUnit.targets)
+	{
+		for (const auto& framebufferSet : target.framebuffers)
+		{
+			for (auto framebuffer : framebufferSet)
+			{
+				if (framebuffer != VK_NULL_HANDLE)
+					vkDestroyFramebuffer(_device, framebuffer, nullptr);
+			}
+		}
+		for (auto view : target.faceViews)
+		{
+			if (view != VK_NULL_HANDLE)
+				vkDestroyImageView(_device, view, nullptr);
+		}
+		for (const auto& depthViewSet : target.depthViews)
+		{
+			for (auto view : depthViewSet)
+			{
+				if (view != VK_NULL_HANDLE)
+					vkDestroyImageView(_device, view, nullptr);
+			}
+		}
+
+		if (target.cubemapView != VK_NULL_HANDLE)
+			vkDestroyImageView(_device, target.cubemapView, nullptr);
+
+		for (auto depthViewArray : target.depthViewsArray)
+		{
+			if (depthViewArray != VK_NULL_HANDLE)
+				vkDestroyImageView(_device, depthViewArray, nullptr);
+		}
+
+		if (target.cubemapImage != VK_NULL_HANDLE)
+			vkDestroyImage(_device, target.cubemapImage, nullptr);
+		if (target.cubemapMemory != VK_NULL_HANDLE)
+			vkFreeMemory(_device, target.cubemapMemory, nullptr);
+
+		for (auto depthImage : target.depthImages)
+		{
+			if (depthImage != VK_NULL_HANDLE)
+				vkDestroyImage(_device, depthImage, nullptr);
+		}
+		for (auto depthMemory : target.depthMemories)
+		{
+			if (depthMemory != VK_NULL_HANDLE)
+				vkFreeMemory(_device, depthMemory, nullptr);
+		}
+	}
+
+	if (_depthHistorySampler != VK_NULL_HANDLE)
+	{
+		vkDestroySampler(_device, _depthHistorySampler, nullptr);
+		_depthHistorySampler = VK_NULL_HANDLE;
+	}
+
+	_cubemapRenderUnit.targets.clear();
+	_cubemapRenderUnit.graphicsCmdPerTarget.clear();
+}
+
+void CubemapRenderInstance::Initialize() {
+
+	if (_computeType == PMVCComputeType::Serial) {
 		_computeStage = std::make_unique<GpuSerialComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -87,10 +203,11 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh, 
-			_offset
+			_pmvcUseOffset,
+			_targetCount
 		);
 	}
-	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Ring) {
 		_computeStage = std::make_unique<GpuAtomicComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -101,10 +218,11 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset,
+			_targetCount
 		);
 	}
-	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::All) {
 		_computeStage = std::make_unique<GpuMPComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -115,10 +233,11 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset,
+			_targetCount
 		);
 	}
-	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Cpu) {
 		_computeStage = std::make_unique<CpuComputeStrategy>(
 			_device,
 			_device->GetQueueFamilies()._graphics.value(),
@@ -129,7 +248,8 @@ void CubemapRenderInstance::Initialize() {
 			_renderPipelineManager,
 			_cageMesh,
 			_deformableMesh,
-			_offset
+			_pmvcUseOffset,
+			_targetCount
 		);
 	}
 
@@ -138,6 +258,16 @@ void CubemapRenderInstance::Initialize() {
 
 	const uint32_t targetCount = _computeStage->RequiredRenderTargetCount();
 	_computeStage->Initialize();
+
+	VkSamplerCreateInfo depthSamplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+	depthSamplerInfo.magFilter = VK_FILTER_NEAREST;
+	depthSamplerInfo.minFilter = VK_FILTER_NEAREST;
+	depthSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	depthSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	depthSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	depthSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	depthSamplerInfo.maxAnisotropy = 1.0f;
+	VK_CHECK(vkCreateSampler(_device, &depthSamplerInfo, nullptr, &_depthHistorySampler));
 
 	_cubemapRenderUnit.targets.reserve(targetCount);
 	for (uint32_t i = 0; i < targetCount; ++i)
@@ -248,7 +378,7 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 	VK_CHECK(vkCreateImageView(_device, &cubeViewInfo, nullptr, &target.cubemapView));
 
 	// ---------------------------------------------------------------------
-	// Create depth image
+	// Create depth images (ping-pong)
 	// ---------------------------------------------------------------------
 	VkFormat depthFormat = _device->FindDepthFormat();
 
@@ -265,68 +395,92 @@ CubemapRenderTarget CubemapRenderInstance::CreateCubemapRenderTarget() const
 		VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImage));
-
-	vkGetImageMemoryRequirements(_device, target.depthImage, &memReq);
-
-	allocInfo.allocationSize = memReq.size;
-	allocInfo.memoryTypeIndex =
-		FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-	VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.depthMemory));
-	VK_CHECK(vkBindImageMemory(_device, target.depthImage, target.depthMemory, 0));
-
-	// ---------------------------------------------------------------------
-	// Create per-face depth views
-	// ---------------------------------------------------------------------
-	for (uint32_t face = 0; face < 6; ++face)
+	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
 	{
-		VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		viewInfo.image = target.depthImage;
-		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		viewInfo.format = depthFormat;
-		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		viewInfo.subresourceRange.levelCount = 1;
-		viewInfo.subresourceRange.baseArrayLayer = face;
-		viewInfo.subresourceRange.layerCount = 1;
+		VK_CHECK(vkCreateImage(_device, &depthInfo, nullptr, &target.depthImages[pingPong]));
 
-		VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[face]));
+		vkGetImageMemoryRequirements(_device, target.depthImages[pingPong], &memReq);
+		allocInfo.allocationSize = memReq.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VK_CHECK(vkAllocateMemory(_device, &allocInfo, nullptr, &target.depthMemories[pingPong]));
+		VK_CHECK(vkBindImageMemory(_device, target.depthImages[pingPong], target.depthMemories[pingPong], 0));
+
+		for (uint32_t face = 0; face < 6; ++face)
+		{
+			VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+			viewInfo.image = target.depthImages[pingPong];
+			viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			viewInfo.format = depthFormat;
+			viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			viewInfo.subresourceRange.levelCount = 1;
+			viewInfo.subresourceRange.baseArrayLayer = face;
+			viewInfo.subresourceRange.layerCount = 1;
+			VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &target.depthViews[pingPong][face]));
+		}
+
+		VkImageViewCreateInfo depthViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		depthViewInfo.image = target.depthImages[pingPong];
+		depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		depthViewInfo.format = depthFormat;
+		depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		depthViewInfo.subresourceRange.baseMipLevel = 0;
+		depthViewInfo.subresourceRange.levelCount = 1;
+		depthViewInfo.subresourceRange.baseArrayLayer = 0;
+		depthViewInfo.subresourceRange.layerCount = 6;
+		VK_CHECK(vkCreateImageView(_device, &depthViewInfo, nullptr, &target.depthViewsArray[pingPong]));
 	}
 
-	VkImageViewCreateInfo depthViewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-	depthViewInfo.image = target.depthImage;
-	depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	depthViewInfo.format = depthFormat;
-	depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	depthViewInfo.subresourceRange.baseMipLevel = 0;
-	depthViewInfo.subresourceRange.levelCount = 1;
-	depthViewInfo.subresourceRange.baseArrayLayer = 0;
-	depthViewInfo.subresourceRange.layerCount = 6;
+	std::array<VkDescriptorSetLayout, 2> depthLayouts{
+		_depthHistoryLayout->GetReference(),
+		_depthHistoryLayout->GetReference()
+	};
+	VkDescriptorSetAllocateInfo depthAllocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+	depthAllocInfo.descriptorPool = _descriptorPool;
+	depthAllocInfo.descriptorSetCount = static_cast<uint32_t>(depthLayouts.size());
+	depthAllocInfo.pSetLayouts = depthLayouts.data();
+	VK_CHECK(vkAllocateDescriptorSets(_device, &depthAllocInfo, target.depthHistoryDescriptorSets.data()));
 
-	VK_CHECK(vkCreateImageView(_device, &depthViewInfo, nullptr, &target.depthView));
-
-	// ---------------------------------------------------------------------
-	// Create framebuffers
-	// ---------------------------------------------------------------------
-	for (uint32_t face = 0; face < 6; ++face)
+	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
 	{
-		VkImageView attachments[2] = {
-			target.faceViews[face],
-			target.depthViews[face]
-		};
+		const uint32_t historyIndex = 1u - pingPong;
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.sampler = _depthHistorySampler;
+		imageInfo.imageView = target.depthViewsArray[historyIndex];
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
-		VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-		if(_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType ==  DeformationType::PMVCCpuOffset)
-			fbInfo.renderPass = _renderPassCpu;
-		else
-			fbInfo.renderPass = _renderPass;
-		fbInfo.attachmentCount = 2;
-		fbInfo.pAttachments = attachments;
-		fbInfo.width = _cubemapSize;
-		fbInfo.height = _cubemapSize;
-		fbInfo.layers = 1;
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = target.depthHistoryDescriptorSets[pingPong];
+		write.dstBinding = 0;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.descriptorCount = 1;
+		write.pImageInfo = &imageInfo;
+		vkUpdateDescriptorSets(_device, 1, &write, 0, nullptr);
+	}
 
-		VK_CHECK(vkCreateFramebuffer(_device, &fbInfo, nullptr, &target.framebuffers[face]));
+	target.depthImage = target.depthImages[0];
+	target.depthMemory = target.depthMemories[0];
+	target.depthView = target.depthViewsArray[0];
+
+	for (uint32_t pingPong = 0; pingPong < 2; ++pingPong)
+	{
+		for (uint32_t face = 0; face < 6; ++face)
+		{
+			VkImageView attachments[2] = {
+				target.faceViews[face],
+				target.depthViews[pingPong][face]
+			};
+
+			VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+			fbInfo.renderPass = (_computeType == PMVCComputeType::Cpu) ? _renderPassCpu : _renderPass;
+			fbInfo.attachmentCount = 2;
+			fbInfo.pAttachments = attachments;
+			fbInfo.width = _cubemapSize;
+			fbInfo.height = _cubemapSize;
+			fbInfo.layers = 1;
+
+			VK_CHECK(vkCreateFramebuffer(_device, &fbInfo, nullptr, &target.framebuffers[pingPong][face]));
+		}
 	}
 
 	return target;
@@ -471,7 +625,8 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	const glm::vec3& camPos,
 	CubemapRenderTarget& target,
 	VkSemaphore timeline,
-	uint64_t signalValue)
+	uint64_t signalValue,
+	uint32_t hitIndex = 0)
 {
 	assert(targetIndex < _cubemapRenderUnit.graphicsCmdPerTarget.size());
 
@@ -485,8 +640,10 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 	};
 	
 	PipelineHandle pipelineHandle = _cubemapPipelineHandle;
-	if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+	if (_computeType == PMVCComputeType::Cpu)
 		pipelineHandle = _cubemapPipelineHandleCpu;
+	else if (hitIndex > 0)
+		pipelineHandle = _cubemapPipelineHitHandle;
 
 	const PipelineObject& pipelineObj =
 		_renderPipelineManager->GetPipelineObject(
@@ -515,26 +672,27 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 		VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
 		CubemapPushConstants push{};
-		push.proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 1000.0f);
+		push.proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.01f, 1000.0f);
 		push.proj[1][1] *= -1.0f;
 		push.view = ComputeCubemapViewMatrix(face, camPos);
+		push.faceIndex = static_cast<int>(face);
 
 		vkCmdPushConstants(
 			cmd,
 			pipelineObj._pipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 			0,
 			sizeof(push),
 			&push);
 
 		VkRenderPass renderPass = _renderPass;
-		if (_deformationType == DeformationType::PMVCCpuNoOffset || _deformationType == DeformationType::PMVCCpuOffset)
+		if (_computeType == PMVCComputeType::Cpu)
 			renderPass = _renderPassCpu;
 
 		VkRenderPassBeginInfo rpInfo{
 			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 			.renderPass = renderPass,
-			.framebuffer = target.framebuffers[face],
+			.framebuffer = target.framebuffers[hitIndex % 2][face],
 			.renderArea = {{0, 0}, {_cubemapSize, _cubemapSize}},
 			.clearValueCount = 2,
 			.pClearValues = clearValues
@@ -559,6 +717,17 @@ void CubemapRenderInstance::RecordAndSubmitCubemapRender(
 			0, 1,
 			&_cubemapRenderUnit.matricesDescriptorSet,
 			0, nullptr);
+
+		if (hitIndex > 0)
+		{
+			vkCmdBindDescriptorSets(
+				cmd,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				pipelineObj._pipelineLayout,
+				1, 1,
+				&target.depthHistoryDescriptorSets[hitIndex % 2],
+				0, nullptr);
+		}
 
 		vkCmdDrawIndexed(
 			cmd,
@@ -656,13 +825,6 @@ std::vector<glm::vec3> CubemapRenderInstance::BuildDeformableVertexPositions() c
 	return vertices;
 }
 
-static double SecondsSince(
-	const std::chrono::high_resolution_clock::time_point& start)
-{
-	using namespace std::chrono;
-	return duration<double>(high_resolution_clock::now() - start).count();
-}
-
 glm::mat4 CubemapRenderInstance::ComputeCubemapViewMatrix(uint32_t faceIndex, const glm::vec3& pos)
 {
 	switch (faceIndex)
@@ -693,162 +855,114 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	const CubemapWorkRange& range,
 	Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	auto waitStart = std::chrono::high_resolution_clock::now();
 	auto waitTemp = std::chrono::high_resolution_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
-
-	auto* computeStage =
-		static_cast<GpuMPComputeStrategy*>(_computeStage.get());
-
+  
+	auto* computeStage = static_cast<GpuMPComputeStrategy*>(_computeStage.get());
 	const auto vertices = BuildDeformableVertexPositions();
 
 	const uint32_t end = std::min<uint32_t>(
 		range.first + range.count,
 		static_cast<uint32_t>(vertices.size())
 	);
-
 	const uint32_t cubemapCount = end - range.first;
+	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
+	double renderAccumulatedMs = 0.0;
+	double computeAccumulatedMs = 0.0;
+
+	if (cubemapCount == 0 || slotCount == 0)
+	{
+		weights = computeStage->Readback();
+		return;
+	}
 
 	VkSemaphore timeline = _timelines[0];
 	uint64_t& timelineValue = _slotDoneValue[0];
 
-	if (timelineValue > 0)
+	for (uint32_t batchStart = 0; batchStart < cubemapCount; batchStart += slotCount)
 	{
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
-		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		const uint32_t batchCount = std::min(slotCount, cubemapCount - batchStart);
+
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		}
+
+		for (uint32_t hit = 0; hit < _hitCount; ++hit)
+		{
+			const auto renderStart = std::chrono::steady_clock::now();
+			uint64_t renderDone = timelineValue;
+			for (uint32_t slot = 0; slot < batchCount; ++slot)
+			{
+				const uint32_t cubemapIdx = range.first + batchStart + slot;
+				CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+
+				renderDone = ++timelineValue;
+				RecordAndSubmitCubemapRender(
+					cubemapIdx,
+					slot,
+					vertices[cubemapIdx],
+					target,
+					timeline,
+					renderDone,
+					hit);
+
+				target.depthView = target.depthViewsArray[hit % 2];
+				computeStage->RecordCompute(slot, target, cubemapIdx);
+			}
+			const auto renderEnd = std::chrono::steady_clock::now();
+			renderAccumulatedMs += std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+
+			if (_omitNegative && ((hit + 1) % 2u == 0u))
+			{
+				continue;
+			}
+
+			const auto computeStart = std::chrono::steady_clock::now();
+			const uint64_t computeDone = ++timelineValue;
+			computeStage->SubmitAllComputes(timeline, renderDone, timeline, computeDone);
+
+			const uint64_t copyDone = ++timelineValue;
+			computeStage->SubmitAllReadbackCopies(timeline, computeDone, timeline, copyDone);
+
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &copyDone;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+
+			timelineValue = copyDone;
+
+			computeStage->ConsumeAllSlots(hit);
+			
+			const auto computeEnd = std::chrono::steady_clock::now();
+			computeAccumulatedMs += std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
+			
+		}
 	}
 
-	if (timelineValue > 0)
-	{
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
-		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
-	}
-	// ============================================================
-	// Phase 1: Render ALL cubemaps
-	// ============================================================
-	uint64_t renderDone = timelineValue;
-
-	double waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG("Init complete");
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-
-	waitTemp = std::chrono::high_resolution_clock::now();
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		const uint32_t cubemapIdx = range.first + i;
-		CubemapRenderTarget& target =
-			_cubemapRenderUnit.targets[i];
-		renderDone = ++timelineValue;
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			i,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone
-		);
-	}
-	LOG_DEBUG("Cubemap Renders submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	// ============================================================
-	// Phase 2: Record ALL compute command buffers
-	// ============================================================
-	waitTemp = std::chrono::high_resolution_clock::now();
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		computeStage->RecordCompute(
-			i,
-			_cubemapRenderUnit.targets[i],
-			range.first + i
-		);
-	}
-	LOG_DEBUG("Cubemap Renders recorded");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-
-	uint64_t computeDone = ++timelineValue;
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->SubmitAllComputes(
-		timeline,
-		renderDone,
-		timeline,
-		computeDone
-	);
-	LOG_DEBUG("Computes submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	// ============================================================
-	// Phase 3: Submit ALL readback copies
-	// ============================================================
-	uint64_t copyDone = ++timelineValue;
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->SubmitAllReadbackCopies(
-		timeline,
-		computeDone,
-		timeline,
-		copyDone
-	);
-	LOG_DEBUG("Readback submitted");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	// ============================================================
-	// Phase 4: Wait ONCE (everything complete)
-	// ============================================================
-	VkSemaphoreWaitInfo wait{};
-	wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-	wait.semaphoreCount = 1;
-	wait.pSemaphores = &timeline;
-	wait.pValues = &copyDone;
-
-	vkWaitSemaphores(_device, &wait, UINT64_MAX);
-	//timelineValue = copyDone;
-	timelineValue = copyDone;
-	// ============================================================
-	// Phase 5: Consume ALL slots (CPU-side)
-	// ============================================================
-	waitTemp = std::chrono::high_resolution_clock::now();
-	computeStage->ConsumeAllSlots();
-	LOG_DEBUG("Slots consumed");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	waitTemp = std::chrono::high_resolution_clock::now();
+	const auto readbackStart = std::chrono::steady_clock::now();
 	weights = computeStage->Readback();
-	LOG_DEBUG("Readback complete");
-	waitSeconds = SecondsSince(waitTemp);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
-	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched): done");
-	waitSeconds = SecondsSince(waitStart);
-	LOG_DEBUG(
-		"Total time={:.6f} ms",
-		waitSeconds * 1000.0);
+	const auto readbackEnd = std::chrono::steady_clock::now();
+	computeAccumulatedMs += std::chrono::duration<double, std::milli>(readbackEnd - readbackStart).count();
+
+	_renderMs = renderAccumulatedMs;
+	_computeMs = computeAccumulatedMs;
+	_computeTotalMs = std::chrono::duration<double, std::milli>(readbackEnd - totalStart).count();
 }
 
 void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -861,152 +975,131 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 		range.first + range.count,
 		static_cast<uint32_t>(vertices.size())
 	);
+	const uint32_t cubemapCount = end > range.first ? end - range.first : 0;
+	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
 
-	constexpr uint32_t SlotCount = 3; // ⭐ sweet spot
-	static_assert(SlotCount > 0);
-
-	// ------------------------------------------------------------
-	// Main submission loop (NO per-iteration CPU wait)
-	// ------------------------------------------------------------
-	double totalSlotWaitMs = 0.0;
-	for (uint32_t cubemapIdx = range.first; cubemapIdx < end; ++cubemapIdx)
+	if (cubemapCount == 0 || slotCount == 0)
 	{
-		const uint32_t slot = cubemapIdx % SlotCount;
+		weights = computeStage->Readback();
+		return;
+	}
 
-		CubemapRenderTarget& target =
-			_cubemapRenderUnit.targets[slot];
+	const uint32_t hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+	const uint32_t workerCount = std::max(1u, std::min({ hardwareThreads, slotCount, cubemapCount }));
 
-		VkSemaphore timeline = _timelines[slot];
-		uint64_t& timelineValue = _slotDoneValue[slot];
+	std::vector<std::vector<uint32_t>> slotPools(workerCount);
+	for (uint32_t slot = 0; slot < slotCount; ++slot)
+	{
+		slotPools[slot % workerCount].push_back(slot);
+	}
 
-		LOG_DEBUG("[Pipelined] cubemapIdx={}, slot={}", cubemapIdx, slot);
+	ThreadPool workerPool(workerCount);
+	std::vector<std::promise<void>> completionPromises(workerCount);
+	std::vector<std::future<void>> completionFutures;
+	completionFutures.reserve(workerCount);
+	for (auto& completionPromise : completionPromises)
+	{
+		completionFutures.emplace_back(completionPromise.get_future());
+	}
 
-		// --------------------------------------------------------
-		// 0) Wait ONLY if slot is being reused
-		// --------------------------------------------------------
-		if (timelineValue > 0)
+	std::mutex submitMutex;
+
+	for (uint32_t workerId = 0; workerId < workerCount; ++workerId)
+	{
+		workerPool.Submit([&, workerId]() mutable
 		{
-			VkSemaphoreWaitInfo waitInfo{};
-			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-			waitInfo.semaphoreCount = 1;
-			waitInfo.pSemaphores = &timeline;
-			waitInfo.pValues = &timelineValue;
+			try
+			{
+				VkSemaphore timeline = _timelines[workerId];
+				uint64_t& timelineValue = _slotDoneValue[workerId];
+				const auto& pool = slotPools[workerId];
 
-			auto waitStart = std::chrono::high_resolution_clock::now();
+				for (uint32_t batchStart = 0; batchStart < cubemapCount; batchStart += slotCount)
+				{
+					const uint32_t batchCount = std::min(slotCount, cubemapCount - batchStart);
 
-			vkWaitSemaphores(
-				_device,
-				&waitInfo,
-				UINT64_MAX
-			);
+					if (timelineValue > 0)
+					{
+						VkSemaphoreWaitInfo waitInfo{};
+						waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+						waitInfo.semaphoreCount = 1;
+						waitInfo.pSemaphores = &timeline;
+						waitInfo.pValues = &timelineValue;
+						VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+					}
 
-			double waitSeconds = SecondsSince(waitStart);
+					for (const uint32_t slot : pool)
+					{
+						if (slot >= batchCount)
+						{
+							continue;
+						}
 
-			LOG_DEBUG(
-				"  [SlotWait] slot={}, value={}, wait={:.6f} ms",
-				slot,
-				timelineValue,
-				waitSeconds * 1000.0
-			);
-			totalSlotWaitMs += waitSeconds * 1000.0;
-		}
+						const uint32_t cubemapIdx = range.first + batchStart + slot;
+						CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
 
-		// --------------------------------------------------------
-		// 1) Render
-		// --------------------------------------------------------
-		uint64_t renderDone = ++timelineValue;
+						const uint64_t renderDone = ++timelineValue;
+						{
+							std::lock_guard lock(submitMutex);
+							RecordAndSubmitCubemapRender(
+								cubemapIdx,
+								slot,
+								vertices[cubemapIdx],
+								target,
+								timeline,
+								renderDone);
+						}
 
-		LOG_DEBUG("  [Render] signal={}", renderDone);
+						const uint64_t computeDone = ++timelineValue;
+						{
+							std::lock_guard lock(submitMutex);
+							computeStage->DispatchAfterRender(
+								cubemapIdx,
+								slot,
+								timeline,
+								renderDone,
+								computeDone,
+								target
+							);
+						}
 
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			slot,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone
-		);
+						const uint64_t copyDone = ++timelineValue;
+						{
+							std::lock_guard lock(submitMutex);
+							computeStage->SubmitReadbackCopy(
+								slot,
+								timeline,
+								computeDone,
+								copyDone
+							);
+						}
 
-		// --------------------------------------------------------
-		// 2) Compute (waits on renderDone)
-		// --------------------------------------------------------
-		uint64_t computeDone = ++timelineValue;
+						computeStage->ConsumeSlot(
+							cubemapIdx,
+							slot,
+							timeline,
+							copyDone
+						);
+					}
+				}
 
-		LOG_DEBUG("  [Compute] wait={}, signal={}",
-			renderDone, computeDone);
-
-		computeStage->DispatchAfterRender(
-			cubemapIdx,
-			slot,
-			timeline,
-			renderDone,
-			computeDone,
-			target
-		);
-
-		// --------------------------------------------------------
-		// 3) Copy (waits on computeDone)
-		// --------------------------------------------------------
-		uint64_t copyDone = ++timelineValue;
-
-		LOG_DEBUG("  [Copy] wait={}, signal={}",
-			computeDone, copyDone);
-
-		computeStage->SubmitReadbackCopy(
-			slot,
-			timeline,
-			computeDone,
-			copyDone
-		);
-
-		computeStage->ConsumeSlot(
-			cubemapIdx,
-			slot,
-			timeline,
-			copyDone
-		);
-
-		// timelineValue now represents the last in-flight op for this slot
+				completionPromises[workerId].set_value();
+			}
+			catch (...)
+			{
+				completionPromises[workerId].set_exception(std::current_exception());
+			}
+		});
 	}
 
-	// ------------------------------------------------------------
-	// Final synchronization (wait for ALL slots)
-	// ------------------------------------------------------------
-	for (uint32_t slot = 0; slot < SlotCount; ++slot)
+	for (auto& completion : completionFutures)
 	{
-		VkSemaphore timeline = _timelines[slot];
-		uint64_t value = _slotDoneValue[slot];
-
-		if (value == 0)
-			continue;
-
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &value;
-
-		auto waitStart = std::chrono::high_resolution_clock::now();
-
-		vkWaitSemaphores(_device, &waitInfo, UINT64_MAX);
-
-		double waitSeconds = SecondsSince(waitStart);
-
-		LOG_DEBUG(
-			"  [FinalWait] slot={}, value={}, wait={:.6f} ms",
-			slot,
-			value,
-			waitSeconds * 1000.0);
-		totalSlotWaitMs += waitSeconds * 1000.0;
+		completion.get();
 	}
-	LOG_DEBUG(
-		"GPUAtomic pipelining stats: slotWait={:.3f} ms",
-		totalSlotWaitMs
-	);
-	// ------------------------------------------------------------
-	// Readback (now guaranteed complete)
-	// ------------------------------------------------------------
+
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): done");
 }
@@ -1014,6 +1107,7 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
+	const auto totalStart = std::chrono::steady_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: range.first={}, range.count={}",
 		range.first, range.count);
 
@@ -1026,90 +1120,97 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 		range.first + range.count,
 		static_cast<uint32_t>(vertices.size())
 	);
+	const uint32_t cubemapCount = end > range.first ? end - range.first : 0;
+	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
 
-	// ---- single slot ----
-	constexpr uint32_t slot = 0;
-	CubemapRenderTarget& target =
-		_cubemapRenderUnit.targets[slot];
-
-	VkSemaphore timeline = _timelines[slot];
-	uint64_t& timelineValue = _slotDoneValue[slot];
-
-	for (uint32_t cubemapIdx = range.first; cubemapIdx < end; ++cubemapIdx)
+	if (cubemapCount == 0 || slotCount == 0)
 	{
-		LOG_DEBUG("[Serial] cubemapIdx={}", cubemapIdx);
-
-		// ------------------------------------------------------------
-		// 1) Render
-		// ------------------------------------------------------------
-		uint64_t renderDone = ++timelineValue;
-
-		LOG_DEBUG("  [Render] signal={}", renderDone);
-
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			slot,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone
-		);
-
-		// ------------------------------------------------------------
-		// 2) Compute (waits on renderDone)
-		// ------------------------------------------------------------
-		uint64_t computeDone = ++timelineValue;
-
-		LOG_DEBUG("  [Compute] wait={}, signal={}",
-			renderDone, computeDone);
-
-		computeStage->DispatchAfterRender(
-			cubemapIdx,
-			slot,
-			timeline,
-			renderDone,
-			computeDone,
-			target
-		);
-
-		// ------------------------------------------------------------
-		// 3) Copy (waits on computeDone)
-		// ------------------------------------------------------------
-		uint64_t copyDone = ++timelineValue;
-
-		LOG_DEBUG("  [Copy] wait={}, signal={}",
-			computeDone, copyDone);
-
-		computeStage->SubmitReadbackCopy(
-			slot,
-			timeline,
-			computeDone,
-			copyDone
-		);
-
-		computeStage->ConsumeSlot(
-			cubemapIdx,
-			slot,
-			timeline,
-			copyDone
-		);
-
-		// ------------------------------------------------------------
-		// 4) CPU wait (serialization point)
-		// ------------------------------------------------------------
-		VkSemaphoreWaitInfo waitInfo{};
-		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-		waitInfo.semaphoreCount = 1;
-		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &computeDone;
-
-		vkWaitSemaphores(
-			_device,
-			&waitInfo,
-			UINT64_MAX
-		);
+		weights = computeStage->Readback();
+		return;
 	}
+
+	VkSemaphore timeline = _timelines[0];
+	uint64_t& timelineValue = _slotDoneValue[0];
+
+	for (uint32_t batchStart = 0; batchStart < cubemapCount; batchStart += slotCount)
+	{
+		const uint32_t batchCount = std::min(slotCount, cubemapCount - batchStart);
+
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		}
+
+		std::vector<uint64_t> renderDoneValues(batchCount);
+		std::vector<uint64_t> computeDoneValues(batchCount);
+		std::vector<uint64_t> copyDoneValues(batchCount);
+
+		for (uint32_t slot = 0; slot < batchCount; ++slot)
+		{
+			const uint32_t cubemapIdx = range.first + batchStart + slot;
+			CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+
+			renderDoneValues[slot] = ++timelineValue;
+			RecordAndSubmitCubemapRender(
+				cubemapIdx,
+				slot,
+				vertices[cubemapIdx],
+				target,
+				timeline,
+				renderDoneValues[slot],
+				0
+			);
+		}
+
+		for (uint32_t slot = 0; slot < batchCount; ++slot)
+		{
+			const uint32_t cubemapIdx = range.first + batchStart + slot;
+			CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+
+			computeDoneValues[slot] = ++timelineValue;
+			computeStage->DispatchAfterRender(
+				cubemapIdx,
+				slot,
+				timeline,
+				renderDoneValues[slot],
+				computeDoneValues[slot],
+				target
+			);
+		}
+
+		for (uint32_t slot = 0; slot < batchCount; ++slot)
+		{
+			copyDoneValues[slot] = ++timelineValue;
+			computeStage->SubmitReadbackCopy(
+				slot,
+				timeline,
+				computeDoneValues[slot],
+				copyDoneValues[slot]
+			);
+		}
+
+		for (uint32_t slot = 0; slot < batchCount; ++slot)
+		{
+			const uint32_t cubemapIdx = range.first + batchStart + slot;
+			computeStage->ConsumeSlot(
+				cubemapIdx,
+				slot,
+				timeline,
+				copyDoneValues[slot]
+			);
+		}
+
+		timelineValue = copyDoneValues.back();
+	}
+
 	weights = computeStage->Readback();
+	const auto totalEnd = std::chrono::steady_clock::now();
+	_computeTotalMs = std::chrono::duration<double, std::milli>(totalEnd - totalStart).count();
 
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: done");
 }
@@ -1126,71 +1227,103 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 		static_cast<uint32_t>(vertices.size())
 	);
 	const uint32_t cubemapCount = end - range.first;
+	const uint32_t slotCount = static_cast<uint32_t>(_cubemapRenderUnit.targets.size());
+	double renderAccumulatedMs = 0.0;
+	double computeAccumulatedMs = 0.0;
+	double transferAccumulatedMs = 0.0;
+
+	if (cubemapCount == 0 || slotCount == 0)
+	{
+		weights = computeStage->Readback();
+		return;
+	}
 
 	VkSemaphore timeline = _timelines[0];
 	uint64_t& timelineValue = _slotDoneValue[0];
 
-	if (timelineValue > 0)
+	for (uint32_t batchStart = 0; batchStart < cubemapCount; batchStart += slotCount)
 	{
+		const uint32_t batchCount = std::min(slotCount, cubemapCount - batchStart);
+
+		if (timelineValue > 0)
+		{
+			VkSemaphoreWaitInfo waitInfo{};
+			waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+			waitInfo.semaphoreCount = 1;
+			waitInfo.pSemaphores = &timeline;
+			waitInfo.pValues = &timelineValue;
+			VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
+		}
+
+		const auto renderStart = std::chrono::steady_clock::now();
+		uint64_t renderDone = timelineValue;
+		for (uint32_t slot = 0; slot < batchCount; ++slot)
+		{
+			const uint32_t cubemapIdx = range.first + batchStart + slot;
+			CubemapRenderTarget& target = _cubemapRenderUnit.targets[slot];
+
+			renderDone = ++timelineValue;
+			RecordAndSubmitCubemapRender(
+				cubemapIdx,
+				slot,
+				vertices[cubemapIdx],
+				target,
+				timeline,
+				renderDone,
+				0);
+
+			computeStage->RecordReadback(slot, target, cubemapIdx);
+		}
+		const auto renderEnd = std::chrono::steady_clock::now();
+		renderAccumulatedMs += std::chrono::duration<double, std::milli>(renderEnd - renderStart).count();
+
+		const auto transferStart = std::chrono::steady_clock::now();
+		const uint64_t readbackDone = ++timelineValue;
+		computeStage->SubmitAllReadbacks(timeline, renderDone, timeline, readbackDone);
+
 		VkSemaphoreWaitInfo waitInfo{};
 		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
 		waitInfo.semaphoreCount = 1;
 		waitInfo.pSemaphores = &timeline;
-		waitInfo.pValues = &timelineValue;
+		waitInfo.pValues = &readbackDone;
 		VK_CHECK(vkWaitSemaphores(_device, &waitInfo, UINT64_MAX));
-	}
-	LOG_DEBUG("Start render");
-	uint64_t renderDone = timelineValue;
-	for (uint32_t i = 0; i < cubemapCount; ++i)
-	{
-		const uint32_t cubemapIdx = range.first + i;
-		CubemapRenderTarget& target = _cubemapRenderUnit.targets[i];
+		const auto transferEnd = std::chrono::steady_clock::now();
+		transferAccumulatedMs += std::chrono::duration<double, std::milli>(transferEnd - transferStart).count();
 
-		renderDone = ++timelineValue;
-		RecordAndSubmitCubemapRender(
-			cubemapIdx,
-			i,
-			vertices[cubemapIdx],
-			target,
-			timeline,
-			renderDone
-		);
-
-		computeStage->RecordReadback(i, target, cubemapIdx);
+		timelineValue = readbackDone;
+		const auto computeStart = std::chrono::steady_clock::now();
+		computeStage->ConsumeAllSlots();
+		const auto computeEnd = std::chrono::steady_clock::now();
+		computeAccumulatedMs += std::chrono::duration<double, std::milli>(computeEnd - computeStart).count();
 	}
-	LOG_DEBUG("Readback start");
-	const uint64_t readbackDone = ++timelineValue;
-	computeStage->SubmitAllReadbacks(
-		timeline,
-		renderDone,
-		timeline,
-		readbackDone
-	);
-	
-	VkSemaphoreWaitInfo wait{};
-	wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-	wait.semaphoreCount = 1;
-	wait.pSemaphores = &timeline;
-	wait.pValues = &readbackDone;
-	VK_CHECK(vkWaitSemaphores(_device, &wait, UINT64_MAX));
-	timelineValue = readbackDone;
-	LOG_DEBUG("Compute start");
-	computeStage->ConsumeAllSlots();
+
+	const auto readbackStart = std::chrono::steady_clock::now();
 	weights = computeStage->Readback();
+	const auto readbackEnd = std::chrono::steady_clock::now();
+	transferAccumulatedMs += std::chrono::duration<double, std::milli>(readbackEnd - readbackStart).count();
+
+	_renderMs = renderAccumulatedMs;
+	_computeMs = computeAccumulatedMs;
+	_transferMs = transferAccumulatedMs;
+	_computeTotalMs = renderAccumulatedMs + computeAccumulatedMs + transferAccumulatedMs;
 }
 
 void CubemapRenderInstance::ComputeCoordinates(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights) {
-	if (DeformationType::PMVCSerialOffset == _deformationType || DeformationType::PMVCSerialNoOffset == _deformationType) {
+	_renderMs.reset();
+	_computeMs.reset();
+	_computeTotalMs.reset();
+	_transferMs.reset();
+	if (_computeType == PMVCComputeType::Serial) {
 		ComputeCoordinatesGPUSerial(range, weights);
 	}
-	else if (DeformationType::PMVCRingOffset == _deformationType || DeformationType::PMVCRingNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Ring) {
 		ComputeCoordinatesGPUAtomic(range, weights);
 	}
-	else if (DeformationType::PMVCAllOffset == _deformationType || DeformationType::PMVCAllNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::All) {
 		ComputeCoordinatesGPUMP(range, weights);
 	}
-	else if (DeformationType::PMVCCpuOffset == _deformationType || DeformationType::PMVCCpuNoOffset == _deformationType) {
+	else if (_computeType == PMVCComputeType::Cpu) {
 		ComputeCoordinatesCpu(range, weights);
 	}
 }

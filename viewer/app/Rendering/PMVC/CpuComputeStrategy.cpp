@@ -6,17 +6,22 @@
 #include <limits>
 #include <cassert>
 #include <cstddef>
+#include <thread>
 
 
 uint32_t CpuComputeStrategy::RequiredRenderTargetCount() const
 {
-    return static_cast<uint32_t>(_deformableMesh._vertices.rows());
+    return std::min<uint32_t>(static_cast<uint32_t>(_deformableMesh._vertices.rows()), _maxTargetCount);
 }
 
 void CpuComputeStrategy::Initialize()
 {
-    _targetCount = static_cast<int>(_deformableMesh._vertices.rows());
+    _targetCount = static_cast<int>(RequiredRenderTargetCount());
     _slotToDeformableIndex.assign(_targetCount, UINT32_MAX);
+
+    const uint32_t hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    _cpuWorkerCount = std::max(1u, std::min<uint32_t>(hardwareThreads, static_cast<uint32_t>(_targetCount)));
+    _threadPool = std::make_unique<ThreadPool>(_cpuWorkerCount);
 
     _lambdaResults.resize(_deformableMesh._vertices.rows(), _cageMesh._vertices.rows());
     _lambdaResults.setZero();
@@ -51,6 +56,46 @@ void CpuComputeStrategy::Initialize()
     VK_CHECK(vkAllocateCommandBuffers(_device, &allocInfo, _computeCommandBuffers.data()));
 
     AllocateResources();
+}
+
+void CpuComputeStrategy::Cleanup()
+{
+    if (_computeCommandPool != VK_NULL_HANDLE)
+    {
+        if (!_computeCommandBuffers.empty())
+        {
+            vkFreeCommandBuffers(_device, _computeCommandPool, static_cast<uint32_t>(_computeCommandBuffers.size()), _computeCommandBuffers.data());
+            _computeCommandBuffers.clear();
+        }
+
+        vkDestroyCommandPool(_device, _computeCommandPool, nullptr);
+        _computeCommandPool = VK_NULL_HANDLE;
+    }
+
+    for (auto& slot : _slots)
+    {
+        if (slot.colorBuffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(_device, slot.colorBuffer, nullptr);
+            slot.colorBuffer = VK_NULL_HANDLE;
+        }
+        if (slot.colorMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(_device, slot.colorMemory, nullptr);
+            slot.colorMemory = VK_NULL_HANDLE;
+        }
+
+        if (slot.depthBuffer != VK_NULL_HANDLE)
+        {
+            vkDestroyBuffer(_device, slot.depthBuffer, nullptr);
+            slot.depthBuffer = VK_NULL_HANDLE;
+        }
+        if (slot.depthMemory != VK_NULL_HANDLE)
+        {
+            vkFreeMemory(_device, slot.depthMemory, nullptr);
+            slot.depthMemory = VK_NULL_HANDLE;
+        }
+    }
 }
 
 Eigen::MatrixXd CpuComputeStrategy::Readback()
@@ -253,12 +298,32 @@ void CpuComputeStrategy::SubmitAllReadbacks(
 
 void CpuComputeStrategy::ConsumeAllSlots()
 {
+    std::vector<std::future<void>> tasks;
+    tasks.reserve(_slots.size());
+
     for (size_t slot = 0; slot < _slots.size(); ++slot)
     {
         const uint32_t deformableIndex = _slotToDeformableIndex[slot];
-        if (deformableIndex != UINT32_MAX)
+        if (deformableIndex == UINT32_MAX)
+        {
+            continue;
+        }
+
+        tasks.emplace_back(_threadPool->Submit([this, deformableIndex, slot]()
         {
             ComputeOnCpu(deformableIndex, _slots[slot]);
+        }));
+    }
+
+    for (auto& task : tasks)
+    {
+        task.get();
+    }
+
+    for (size_t slot = 0; slot < _slots.size(); ++slot)
+    {
+        if (_slotToDeformableIndex[slot] != UINT32_MAX)
+        {
             _slotToDeformableIndex[slot] = UINT32_MAX;
         }
     }
@@ -333,10 +398,10 @@ void CpuComputeStrategy::ComputeOnCpu(uint32_t deformableIndex, const SlotReadba
                 float w = _solidAngles[texelIdx];
                 if (!_offset) {
                     const float depth = DecodeDepthSample(depthBytes + texelIdx * _depthBytesPerTexel);
-                    /*if (depth >= kDepthEpsilon)
+                    if (depth >= 0.999999f) //kdepthepsilon
                     {
                         continue;
-                    }*/
+                    }
 
                     w *= (1.0f - depth);
                 }
