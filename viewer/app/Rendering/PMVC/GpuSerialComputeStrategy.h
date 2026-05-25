@@ -10,7 +10,7 @@
 #include <Rendering/PMVC/CubemapRenderInstance.h>
 //#include <Rendering/PMVC/SphereWeightCalculator.h>
 
-class GpuSerialComputeStrategy final : public ICubemapComputeStrategy
+class GpuSerialComputeStrategy final
 {
 public:
     GpuSerialComputeStrategy(
@@ -39,10 +39,10 @@ public:
     {
     }
 
-    uint32_t RequiredRenderTargetCount() const override;
+    uint32_t RequiredRenderTargetCount() const;
 
-    void Initialize() override;
-    void Cleanup() override;
+    void Initialize();
+    void Cleanup();
 
     void DispatchAfterRender(
         uint32_t deformableIndex,

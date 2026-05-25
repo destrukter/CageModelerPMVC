@@ -13,7 +13,7 @@
 #include <Thread/ThreadPool.h>
 #include <Mesh/GeometryUtils.h>
 
-class CpuComputeStrategy final : public ICubemapComputeStrategy
+class CpuComputeStrategy final
 {
 public:
     CpuComputeStrategy(
@@ -42,9 +42,9 @@ public:
     {
     }
 
-    uint32_t RequiredRenderTargetCount() const override;
-    void Initialize() override;
-    void Cleanup() override;
+    uint32_t RequiredRenderTargetCount() const;
+    void Initialize();
+    void Cleanup();
 
     void RecordReadback(uint32_t slot, const CubemapRenderTarget& target, uint32_t deformableIndex);
     void SubmitAllReadbacks(VkSemaphore waitSemaphore, uint64_t waitValue, VkSemaphore signalSemaphore, uint64_t signalValue);

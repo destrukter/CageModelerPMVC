@@ -14,6 +14,12 @@
 #include <Rendering/PMVC/SphereWeightCalculator.h>
 #include <Mesh/Operations/MeshWeightsParams.h>
 #include <optional>
+#include <variant>
+
+class CpuComputeStrategy;
+class GpuAtomicComputeStrategy;
+class GpuMPComputeStrategy;
+class GpuSerialComputeStrategy;
 
 
 class CubemapManager;
@@ -109,7 +115,14 @@ public:
 private:
 	//CubemapManager& _cubemapManager;
 
-	std::unique_ptr<ICubemapComputeStrategy> _computeStage;
+	using ComputeStageVariant = std::variant<
+		std::monostate,
+		std::unique_ptr<GpuSerialComputeStrategy>,
+		std::unique_ptr<GpuAtomicComputeStrategy>,
+		std::unique_ptr<GpuMPComputeStrategy>,
+		std::unique_ptr<CpuComputeStrategy>>;
+
+	ComputeStageVariant _computeStage;
 	
 	//offset
 	bool _pmvcUseOffset;
@@ -128,6 +141,13 @@ private:
 
 	//init functions
 	void Initialize();
+	void InitializeComputeStage();
+	void CleanupComputeStage();
+	uint32_t RequiredRenderTargetCount() const;
+	GpuSerialComputeStrategy* SerialComputeStage();
+	GpuAtomicComputeStrategy* AtomicComputeStage();
+	GpuMPComputeStrategy* MpComputeStage();
+	CpuComputeStrategy* CpuComputeStage();
 	CubemapRenderTarget CreateCubemapRenderTarget() const;
 	CubemapRenderUnit CreateCubemapRenderUnit() const;
 

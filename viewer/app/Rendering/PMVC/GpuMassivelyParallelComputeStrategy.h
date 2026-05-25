@@ -12,7 +12,7 @@
 
 //class SphereWeightCalculator;
 
-class GpuMPComputeStrategy final : public ICubemapComputeStrategy
+class GpuMPComputeStrategy final
 {
 public:
     GpuMPComputeStrategy(
@@ -41,10 +41,10 @@ public:
     {
     }
 
-    uint32_t RequiredRenderTargetCount() const override;
+    uint32_t RequiredRenderTargetCount() const;
 
-    void Initialize() override;
-    void Cleanup() override;
+    void Initialize();
+    void Cleanup();
 
     void DispatchAfterRender(
         uint32_t deformableIndex,
