@@ -64,6 +64,7 @@ public:
 		VkFormat format,
 		PMVCComputeType computeType,
 		bool useOffset,
+		bool useInteriorDistance,
 		uint32_t targetCount,
 		uint32_t hitCount,
 		bool omitNegative,
@@ -112,6 +113,7 @@ private:
 	
 	//offset
 	bool _pmvcUseOffset;
+	bool _pmvcUseInteriorDistance = false;
 
 	//parameters 
 	unsigned int _cubemapSize;

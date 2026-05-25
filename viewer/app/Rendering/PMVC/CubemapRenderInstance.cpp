@@ -118,6 +118,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	VkFormat format,
 	PMVCComputeType computeType,
 	bool useOffset,
+	bool useInteriorDistance,
 	uint32_t targetCount,
 	uint32_t hitCount,
 	bool omitNegative,
@@ -146,6 +147,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _format(format)
 , _computeType(computeType)
 , _pmvcUseOffset(useOffset)
+, _pmvcUseInteriorDistance(useInteriorDistance)
 , _targetCount(targetCount == 0 ? 1u : targetCount)
 , _hitCount(hitCount == 0 ? 1u : hitCount)
 , _omitNegative(omitNegative)
@@ -322,7 +324,8 @@ void CubemapRenderInstance::Initialize() {
 			_cageMesh,
 			_deformableMesh,
 			_pmvcUseOffset,
-			_targetCount
+			_targetCount,
+			_pmvcUseInteriorDistance
 		);
 	}
 

@@ -25,7 +25,8 @@ struct MeshLoadOperationParams
 		const bool noOffset,
 		const bool pmvcUseOffset,
 		const double somigNu,
-		const std::shared_ptr<somig_deformer_3>& somiglianaDeformer
+		const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
+		const bool pmvcUseInteriorDistance = false
 		)
 		: _deformationType(deformationType)
 		, _pmvcComputeType(pmvcComputeType)
@@ -44,6 +45,7 @@ struct MeshLoadOperationParams
 		, _noOffset(noOffset)
 		, _pmvcUseOffset(pmvcUseOffset)
 		, _somigNu(somigNu)
+		, _pmvcUseInteriorDistance(pmvcUseInteriorDistance)
 	{ }
 
 	[[nodiscard]] bool IsFBX() const
@@ -88,6 +90,7 @@ struct MeshLoadOperationParams
 	bool _findOffset = false;
 	bool _noOffset = false;
 	bool _pmvcUseOffset = false;
+	bool _pmvcUseInteriorDistance = false;
 
 	double _somigNu = 0;
 };

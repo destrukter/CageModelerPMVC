@@ -55,6 +55,7 @@ public:
 	MeshOperationResult<MeshComputeWeightsOperationResult> ComputeCoordinates(
 		PMVCComputeType computeType,
 		bool useOffset,
+		bool useInteriorDistance = false,
 		uint32_t targetCount = 64,
 		uint32_t hitCount = 3,
 		bool omitNegative = true);

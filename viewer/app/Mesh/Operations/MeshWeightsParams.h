@@ -200,7 +200,8 @@ struct ProjectData
 		const bool interpolateWeights,
 		const bool findOffset,
 		const bool noOffset,
-		const bool pmvcUseOffset)
+		const bool pmvcUseOffset,
+		const bool pmvcUseInteriorDistance = false)
 		: _deformationType(deformationType)
 		, _pmvcComputeType(pmvcComputeType)
 		, _LBCWeightingScheme(LBCWeightingScheme)
@@ -225,6 +226,7 @@ struct ProjectData
 		, _findOffset(findOffset)
 		, _noOffset(noOffset)
 		, _pmvcUseOffset(pmvcUseOffset)
+		, _pmvcUseInteriorDistance(pmvcUseInteriorDistance)
 	{
 	}
 
@@ -233,6 +235,7 @@ struct ProjectData
 		, _findOffset(false)
 		, _noOffset(false)
 		, _pmvcUseOffset(false)
+		, _pmvcUseInteriorDistance(false)
 	{ }
 
 	[[nodiscard]] bool HarmonicOrLBC() const
@@ -292,4 +295,6 @@ struct ProjectData
 	uint32_t _findOffset : 1;
 	uint32_t _noOffset : 1;
 	uint32_t _pmvcUseOffset : 1;
+	// Use interior geodesic distance instead of Euclidean distance for weight computation (CPU compute type only).
+	uint32_t _pmvcUseInteriorDistance : 1;
 };
