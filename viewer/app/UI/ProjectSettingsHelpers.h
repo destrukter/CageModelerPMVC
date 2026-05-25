@@ -21,8 +21,7 @@ struct ProjecSettingsHelpers
 		"QGC",
 		"Somigliana",
 		"PMVC",
-		"PMVCO",
-		"Raytracing"
+		"PMVCO"
 	};
 
 	static constexpr std::array LBCWeightingSchemeNames = {
