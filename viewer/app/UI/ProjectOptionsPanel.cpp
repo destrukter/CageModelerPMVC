@@ -208,6 +208,21 @@ void ProjectOptionsPanel::Layout()
 					ImGui::InputScalar("##Project_PMVCHitCount", ImGuiDataType_U64, &_modifiedProjectModel._pmvcHitCount);
 					ImGui::EndDisabled();
 				}
+
+				ImGui::TableNextRow();
+				{
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextEx("Interior Distance");
+					ImGui::SameLine();
+					UIHelpers::HelpMarker("Use interior geodesic distance weighting instead of solid-angle weighting (CPU compute type only).");
+
+					ImGui::TableSetColumnIndex(1);
+					UIHelpers::SetRightAligned(25.0f);
+					ImGui::BeginDisabled(_modifiedProjectModel._pmvcComputeType != PMVCComputeType::Cpu);
+					ImGui::Checkbox("##Project_PMVCInteriorDist", &_modifiedProjectModel._pmvcUseInteriorDistance);
+					ImGui::EndDisabled();
+					ImGui::SameLine();
+				}
 			}
 			ImGui::EndDisabled();
 
