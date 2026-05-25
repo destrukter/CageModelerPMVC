@@ -311,5 +311,6 @@ MeshLoadOperation::ExecutionResult MeshLoadOperation::Execute()
 		_params._interpolateWeights,
 		_params._findOffset,
 		_params._noOffset,
-		_params._pmvcUseOffset);
+		_params._pmvcUseOffset,
+		_params._pmvcUseInteriorDistance);
 }

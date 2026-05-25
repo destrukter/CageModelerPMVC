@@ -446,6 +446,7 @@ void CubemapManager::CreateCommandPool(uint32_t queueFamilyIndex) {
 MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(
 	PMVCComputeType computeType,
 	const bool useOffset,
+	const bool useInteriorDistance,
 	const uint32_t targetCount,
 	const uint32_t hitCount,
 	const bool omitNegative) {
@@ -468,6 +469,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		_format,
 		computeType,
 		useOffset,
+		useInteriorDistance,
 		targetCount,
 		hitCount,
 		omitNegative,

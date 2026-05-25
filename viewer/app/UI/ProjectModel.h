@@ -28,6 +28,7 @@ struct ProjectModelData
 		_findOffset = other._findOffset;
 		_noOffset = other._noOffset;
 		_pmvcUseOffset = other._pmvcUseOffset;
+		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
 		_renderInfluenceMap = other._renderInfluenceMap;
 		_cubemapSize = other._cubemapSize;
 		_pmvcTargetCount = other._pmvcTargetCount;
@@ -78,6 +79,7 @@ struct ProjectModelData
 		swap(lhs._findOffset, rhs._findOffset);
 		swap(lhs._noOffset, rhs._noOffset);
 		swap(lhs._pmvcUseOffset, rhs._pmvcUseOffset);
+		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
 		swap(lhs._renderInfluenceMap, rhs._renderInfluenceMap);
 		swap(lhs._cubemapSize, rhs._cubemapSize);
 		swap(lhs._pmvcTargetCount, rhs._pmvcTargetCount);
@@ -125,6 +127,7 @@ struct ProjectModelData
 			lhs._findOffset == rhs._findOffset &&
 			lhs._noOffset == rhs._noOffset &&
 			lhs._pmvcUseOffset == rhs._pmvcUseOffset &&
+			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance &&
 			lhs._cubemapSize == rhs._cubemapSize &&
 			lhs._pmvcTargetCount == rhs._pmvcTargetCount &&
 			lhs._pmvcHitCount == rhs._pmvcHitCount &&
@@ -210,6 +213,7 @@ struct ProjectModelData
 	bool _findOffset = false;
 	bool _noOffset = false;
 	bool _pmvcUseOffset = false;
+	bool _pmvcUseInteriorDistance = false;
 
 	/// Render the influence of the mesh as vertex colors.
 	bool _renderInfluenceMap = false;

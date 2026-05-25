@@ -12,6 +12,7 @@
 #include <Rendering/PMVC/CubemapRenderInstance.h>
 #include <Thread/ThreadPool.h>
 #include <Mesh/GeometryUtils.h>
+#include <Eigen/Core>
 
 class CpuComputeStrategy final : public ICubemapComputeStrategy
 {
@@ -27,7 +28,8 @@ public:
         EigenMesh& cageMesh,
         EigenMesh& deformableMesh,
         bool offset,
-        uint32_t targetCount)
+        uint32_t targetCount,
+        bool useInteriorDistance = false)
         : _device(device)
         , _transferQueueFamily(transferQueueFamily)
         , _faceSize(faceSize)
@@ -39,6 +41,7 @@ public:
         , _deformableMesh(deformableMesh)
         , _offset(offset)
         , _maxTargetCount(targetCount == 0 ? 1u : targetCount)
+        , _useInteriorDistance(useInteriorDistance)
     {
     }
 
@@ -69,6 +72,7 @@ private:
     float ComputeSolidAngle(uint32_t texelX, uint32_t texelY) const;
     float DecodeDepthSample(const uint8_t* texel) const;
     void ComputeOnCpu(uint32_t deformableIndex, const SlotReadback& slot);
+    Eigen::MatrixXd ComputeInteriorDistanceWeights() const;
 
     RenderResourceRef<Device> _device;
     uint32_t _transferQueueFamily = 0;
@@ -103,4 +107,8 @@ private:
     bool _offset = false;
 
     uint32_t _maxTargetCount = 64;
+
+    // Interior geodesic distance weighting
+    bool _useInteriorDistance = false;
+    Eigen::MatrixXf _interiorDistMatrix;  // (N_source x N_cage), populated in Initialize()
 };
