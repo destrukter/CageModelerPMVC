@@ -24,6 +24,7 @@
 #include <thread>
 #include <chrono>
 #include <limits>
+#include <type_traits>
 #include <cmath>
 
 namespace
@@ -172,11 +173,7 @@ void CubemapRenderInstance::Cleanup()
 
 	vkDeviceWaitIdle(_device);
 
-	if (_computeStage)
-	{
-		_computeStage->Cleanup();
-		_computeStage.reset();
-	}
+	CleanupComputeStage();
 
 	for (auto timeline : _timelines)
 	{
@@ -258,73 +255,20 @@ void CubemapRenderInstance::Cleanup()
 }
 
 void CubemapRenderInstance::Initialize() {
-
-	if (_computeType == PMVCComputeType::Serial) {
-		_computeStage = std::make_unique<GpuSerialComputeStrategy>(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format,
-			_descriptorPool,
-			_resourceManager,
-			_renderPipelineManager,
-			_cageMesh,
-			_deformableMesh, 
-			_pmvcUseOffset,
-			_targetCount
-		);
-	}
-	else if (_computeType == PMVCComputeType::Ring) {
-		_computeStage = std::make_unique<GpuAtomicComputeStrategy>(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format,
-			_descriptorPool,
-			_resourceManager,
-			_renderPipelineManager,
-			_cageMesh,
-			_deformableMesh,
-			_pmvcUseOffset,
-			_targetCount
-		);
-	}
-	else if (_computeType == PMVCComputeType::All) {
-		_computeStage = std::make_unique<GpuMPComputeStrategy>(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format,
-			_descriptorPool,
-			_resourceManager,
-			_renderPipelineManager,
-			_cageMesh,
-			_deformableMesh,
-			_pmvcUseOffset,
-			_targetCount
-		);
-	}
-	else if (_computeType == PMVCComputeType::Cpu) {
-		_computeStage = std::make_unique<CpuComputeStrategy>(
-			_device,
-			_device->GetQueueFamilies()._graphics.value(),
-			_cubemapSize,
-			_format,
-			_descriptorPool,
-			_resourceManager,
-			_renderPipelineManager,
-			_cageMesh,
-			_deformableMesh,
-			_pmvcUseOffset,
-			_targetCount
-		);
-	}
+	InitializeComputeStage();
 
 	uint32_t graphicsQueueFamilyIndex = _device->GetQueueFamilies()._graphics.value();
 	CreateCommandPool(graphicsQueueFamilyIndex);
 
-	const uint32_t targetCount = _computeStage->RequiredRenderTargetCount();
-	_computeStage->Initialize();
+	const uint32_t targetCount = RequiredRenderTargetCount();
+	std::visit([](auto& stage)
+	{
+		using T = std::decay_t<decltype(stage)>;
+		if constexpr (!std::is_same_v<T, std::monostate>)
+		{
+			stage->Initialize();
+		}
+	}, _computeStage);
 
 	VkSamplerCreateInfo depthSamplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
 	depthSamplerInfo.magFilter = VK_FILTER_NEAREST;
@@ -994,7 +938,11 @@ void CubemapRenderInstance::ComputeCoordinatesGPUMP(
 	auto waitTemp = std::chrono::high_resolution_clock::now();
 	LOG_DEBUG("ComputeCoordinatesGPUAtomic (batched, no slots)");
   
-	auto* computeStage = static_cast<GpuMPComputeStrategy*>(_computeStage.get());
+	auto* computeStage = MpComputeStage();
+	if (computeStage == nullptr)
+	{
+		throw std::runtime_error("PMVC compute stage mismatch: expected massively parallel GPU strategy");
+	}
 	const auto vertices = BuildDeformableVertexPositions();
 
 	const uint32_t end = std::min<uint32_t>(
@@ -1100,8 +1048,11 @@ void CubemapRenderInstance::ComputeCoordinatesGPUAtomic(
 	LOG_DEBUG("ComputeCoordinatesGPUSerial (pipelined): range.first={}, range.count={}",
 		range.first, range.count);
 
-	auto* computeStage =
-		static_cast<GpuAtomicComputeStrategy*>(_computeStage.get());
+	auto* computeStage = AtomicComputeStage();
+	if (computeStage == nullptr)
+	{
+		throw std::runtime_error("PMVC compute stage mismatch: expected atomic GPU strategy");
+	}
 
 	const auto vertices = BuildDeformableVertexPositions();
 
@@ -1245,8 +1196,11 @@ void CubemapRenderInstance::ComputeCoordinatesGPUSerial(
 	LOG_DEBUG("ComputeCoordinatesGPUSerial: range.first={}, range.count={}",
 		range.first, range.count);
 
-	auto* computeStage =
-		static_cast<GpuSerialComputeStrategy*>(_computeStage.get());
+	auto* computeStage = SerialComputeStage();
+	if (computeStage == nullptr)
+	{
+		throw std::runtime_error("PMVC compute stage mismatch: expected serial GPU strategy");
+	}
 
 	const auto vertices = BuildDeformableVertexPositions();
 
@@ -1353,7 +1307,11 @@ void CubemapRenderInstance::ComputeCoordinatesCpu(
 	const CubemapWorkRange& range, Eigen::MatrixXd& weights)
 {
 	LOG_DEBUG("Start cpu");
-	auto* computeStage = static_cast<CpuComputeStrategy*>(_computeStage.get());
+	auto* computeStage = CpuComputeStage();
+	if (computeStage == nullptr)
+	{
+		throw std::runtime_error("PMVC compute stage mismatch: expected CPU strategy");
+	}
 	const auto vertices = BuildDeformableVertexPositions();
 
 	const uint32_t end = std::min<uint32_t>(

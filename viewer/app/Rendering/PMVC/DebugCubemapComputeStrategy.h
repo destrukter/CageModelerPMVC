@@ -5,7 +5,7 @@
 #include <Rendering/Utils/VulkanUtils.h>
 
 
-class DebugCubemapComputeStrategy final : public ICubemapComputeStrategy
+class DebugCubemapComputeStrategy final
 {
 public:
     DebugCubemapComputeStrategy(
@@ -24,13 +24,13 @@ public:
     {
     }
 
-    uint32_t RequiredRenderTargetCount() const override
+    uint32_t RequiredRenderTargetCount() const
     {
         // Triple-buffering is sensible for CPU readback to overlap render/copy/map.
         return 8;
     }
 
-    void Initialize() override;
+    void Initialize();
     void WaitForTargetReuse(uint32_t targetIndex, VkSemaphore timeline, uint64_t slotDoneValue);
     void DispatchAfterRender(
         uint32_t deformableIndex,
@@ -51,7 +51,6 @@ public:
         uint32_t slot,
         VkSemaphore timeline) {
     }
-    //void Destroy();
 
 private:
     struct Slot
