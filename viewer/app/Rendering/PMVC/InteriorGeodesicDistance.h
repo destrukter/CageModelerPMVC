@@ -55,14 +55,17 @@ private:
         const Eigen::MatrixXi& faces,
         int targetRes);
 
-    // Returns x-intersection of triangle (v0,v1,v2) with the horizontal ray
-    // at (y=cy, z=cz) in the +X direction. Returns false if no intersection.
-    static bool TriangleScanlineX(
-        double cy, double cz,
-        const Eigen::RowVector3d& v0,
-        const Eigen::RowVector3d& v1,
-        const Eigen::RowVector3d& v2,
-        double& xOut);
+    // Ray-triangle intersection helpers: each casts a ray along one axis and
+    // returns the coordinate of intersection along that axis.
+    static bool TriangleScanlineX(double cy, double cz,
+        const Eigen::RowVector3d& v0, const Eigen::RowVector3d& v1,
+        const Eigen::RowVector3d& v2, double& xOut);
+    static bool TriangleScanlineY(double cx, double cz,
+        const Eigen::RowVector3d& v0, const Eigen::RowVector3d& v1,
+        const Eigen::RowVector3d& v2, double& yOut);
+    static bool TriangleScanlineZ(double cx, double cy,
+        const Eigen::RowVector3d& v0, const Eigen::RowVector3d& v1,
+        const Eigen::RowVector3d& v2, double& zOut);
 
     // Dijkstra from seed voxel; returns per-voxel world-space distances.
     static std::vector<float> Dijkstra3D(const Grid& g, int sx, int sy, int sz);
@@ -134,34 +137,86 @@ inline InteriorGeodesicDistance::Grid InteriorGeodesicDistance::BuildGrid(
     g.nx = static_cast<int>(std::ceil(extent.x() / g.pitch)) + 1;
     g.ny = static_cast<int>(std::ceil(extent.y() / g.pitch)) + 1;
     g.nz = static_cast<int>(std::ceil(extent.z() / g.pitch)) + 1;
-    g.cost.assign(static_cast<size_t>(g.nx) * g.ny * g.nz, 1e10f);
 
-    // Scanline voxelization: for each (iy, iz) cast a ray in +X and collect
-    // x-crossings with cage triangles; voxels between crossing pairs are inside.
+    const int totalVoxels = g.nx * g.ny * g.nz;
+    // votes[i] counts how many axis scanlines classify voxel i as inside.
+    // A voxel is marked inside (cost 1.0) only if at least 2 of 3 axes agree.
+    std::vector<int8_t> votes(totalVoxels, 0);
+
+    // +X scanlines: fix (iy, iz), sweep ix
     for (int iz = 0; iz < g.nz; ++iz) {
         const double cz = g.oz + (iz + 0.5) * g.pitch;
         for (int iy = 0; iy < g.ny; ++iy) {
             const double cy = g.oy + (iy + 0.5) * g.pitch;
-
             std::vector<double> xs;
             for (int f = 0; f < faces.rows(); ++f) {
-                double xHit;
+                double hit;
                 if (TriangleScanlineX(cy, cz,
-                        verts.row(faces(f, 0)),
-                        verts.row(faces(f, 1)),
-                        verts.row(faces(f, 2)), xHit))
-                    xs.push_back(xHit);
+                        verts.row(faces(f, 0)), verts.row(faces(f, 1)),
+                        verts.row(faces(f, 2)), hit))
+                    xs.push_back(hit);
             }
             std::sort(xs.begin(), xs.end());
-
             for (size_t k = 0; k + 1 < xs.size(); k += 2) {
                 const int ix0 = std::max(0, static_cast<int>((xs[k]     - g.ox) / g.pitch));
                 const int ix1 = std::min(g.nx - 1, static_cast<int>((xs[k + 1] - g.ox) / g.pitch));
                 for (int ix = ix0; ix <= ix1; ++ix)
-                    g.cost[g.Idx(ix, iy, iz)] = 1.0f;
+                    ++votes[g.Idx(ix, iy, iz)];
             }
         }
     }
+
+    // +Y scanlines: fix (ix, iz), sweep iy
+    for (int iz = 0; iz < g.nz; ++iz) {
+        const double cz = g.oz + (iz + 0.5) * g.pitch;
+        for (int ix = 0; ix < g.nx; ++ix) {
+            const double cx = g.ox + (ix + 0.5) * g.pitch;
+            std::vector<double> ys;
+            for (int f = 0; f < faces.rows(); ++f) {
+                double hit;
+                if (TriangleScanlineY(cx, cz,
+                        verts.row(faces(f, 0)), verts.row(faces(f, 1)),
+                        verts.row(faces(f, 2)), hit))
+                    ys.push_back(hit);
+            }
+            std::sort(ys.begin(), ys.end());
+            for (size_t k = 0; k + 1 < ys.size(); k += 2) {
+                const int iy0 = std::max(0, static_cast<int>((ys[k]     - g.oy) / g.pitch));
+                const int iy1 = std::min(g.ny - 1, static_cast<int>((ys[k + 1] - g.oy) / g.pitch));
+                for (int iy = iy0; iy <= iy1; ++iy)
+                    ++votes[g.Idx(ix, iy, iz)];
+            }
+        }
+    }
+
+    // +Z scanlines: fix (ix, iy), sweep iz
+    for (int iy = 0; iy < g.ny; ++iy) {
+        const double cy = g.oy + (iy + 0.5) * g.pitch;
+        for (int ix = 0; ix < g.nx; ++ix) {
+            const double cx = g.ox + (ix + 0.5) * g.pitch;
+            std::vector<double> zs;
+            for (int f = 0; f < faces.rows(); ++f) {
+                double hit;
+                if (TriangleScanlineZ(cx, cy,
+                        verts.row(faces(f, 0)), verts.row(faces(f, 1)),
+                        verts.row(faces(f, 2)), hit))
+                    zs.push_back(hit);
+            }
+            std::sort(zs.begin(), zs.end());
+            for (size_t k = 0; k + 1 < zs.size(); k += 2) {
+                const int iz0 = std::max(0, static_cast<int>((zs[k]     - g.oz) / g.pitch));
+                const int iz1 = std::min(g.nz - 1, static_cast<int>((zs[k + 1] - g.oz) / g.pitch));
+                for (int iz = iz0; iz <= iz1; ++iz)
+                    ++votes[g.Idx(ix, iy, iz)];
+            }
+        }
+    }
+
+    // A voxel is inside if 2 or more of the 3 axis directions agree.
+    g.cost.assign(totalVoxels, 1e10f);
+    for (int i = 0; i < totalVoxels; ++i)
+        if (votes[i] >= 2) g.cost[i] = 1.0f;
+
     return g;
 }
 
@@ -185,6 +240,52 @@ inline bool InteriorGeodesicDistance::TriangleScanlineX(
     if (s < -eps || t < -eps || s + t > 1.0 + eps) return false;
 
     xOut = v0.x() + s * (v1.x() - v0.x()) + t * (v2.x() - v0.x());
+    return true;
+}
+
+inline bool InteriorGeodesicDistance::TriangleScanlineY(
+    double cx, double cz,
+    const Eigen::RowVector3d& v0,
+    const Eigen::RowVector3d& v1,
+    const Eigen::RowVector3d& v2,
+    double& yOut)
+{
+    // Solve (1-s-t)*v0 + s*v1 + t*v2 = (cx, ?, cz) for barycentric (s,t).
+    const double ax = v1.x() - v0.x(), az = v1.z() - v0.z();
+    const double bx = v2.x() - v0.x(), bz = v2.z() - v0.z();
+    const double det = ax * bz - az * bx;
+    if (std::abs(det) < 1e-12) return false;
+
+    const double rx = cx - v0.x(), rz = cz - v0.z();
+    const double s = (rx * bz - rz * bx) / det;
+    const double t = (ax * rz - az * rx) / det;
+    constexpr double eps = 1e-7;
+    if (s < -eps || t < -eps || s + t > 1.0 + eps) return false;
+
+    yOut = v0.y() + s * (v1.y() - v0.y()) + t * (v2.y() - v0.y());
+    return true;
+}
+
+inline bool InteriorGeodesicDistance::TriangleScanlineZ(
+    double cx, double cy,
+    const Eigen::RowVector3d& v0,
+    const Eigen::RowVector3d& v1,
+    const Eigen::RowVector3d& v2,
+    double& zOut)
+{
+    // Solve (1-s-t)*v0 + s*v1 + t*v2 = (cx, cy, ?) for barycentric (s,t).
+    const double ax = v1.x() - v0.x(), ay = v1.y() - v0.y();
+    const double bx = v2.x() - v0.x(), by = v2.y() - v0.y();
+    const double det = ax * by - ay * bx;
+    if (std::abs(det) < 1e-12) return false;
+
+    const double rx = cx - v0.x(), ry = cy - v0.y();
+    const double s = (rx * by - ry * bx) / det;
+    const double t = (ax * ry - ay * rx) / det;
+    constexpr double eps = 1e-7;
+    if (s < -eps || t < -eps || s + t > 1.0 + eps) return false;
+
+    zOut = v0.z() + s * (v1.z() - v0.z()) + t * (v2.z() - v0.z());
     return true;
 }
 
