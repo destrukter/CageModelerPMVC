@@ -456,9 +456,9 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCreated(); });
 
 	_projectModel->_deformationType = DeformationType::PMVC;
-	_projectModel->_pmvcComputeType = PMVCComputeType::Ring;
+	_projectModel->_pmvcComputeType = PMVCComputeType::Cpu;
 	_projectModel->_pmvcUseOffset = false;
-	_projectModel->_pmvcUseInteriorDistance = false;
+	_projectModel->_pmvcUseInteriorDistance = true;
 	_projectModel->_pmvcTargetCount = 64;
 	_projectModel->_pmvcHitCount = 1;
 	_projectModel->_pmvcOmitNegative = true;
