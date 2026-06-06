@@ -1,6 +1,5 @@
 #include <Rendering/PMVC/CpuComputeStrategy.h>
 #include <Rendering/PMVC/ScopedCmdBuffer.h>
-#include <Rendering/PMVC/InteriorGeodesicDistance.h>
 
 #include <algorithm>
 #include <array>
@@ -57,14 +56,6 @@ void CpuComputeStrategy::Initialize()
     VK_CHECK(vkAllocateCommandBuffers(_device, &allocInfo, _computeCommandBuffers.data()));
 
     AllocateResources();
-
-    if (_useInteriorDistance)
-    {
-        _interiorDistMatrix = InteriorGeodesicDistance::Compute(
-            _cageMesh._vertices,
-            _cageMesh._faces,
-            _deformableMesh._vertices);
-    }
 }
 
 void CpuComputeStrategy::Cleanup()
@@ -109,9 +100,6 @@ void CpuComputeStrategy::Cleanup()
 
 Eigen::MatrixXd CpuComputeStrategy::Readback()
 {
-    if (_useInteriorDistance && _interiorDistMatrix.rows() > 0)
-        return ComputeInteriorDistanceWeights();
-
     for (Eigen::Index row = 0; row < _lambdaResults.rows(); ++row)
     {
         if (_wsumResults[static_cast<size_t>(row)] > std::numeric_limits<float>::epsilon())
@@ -120,42 +108,6 @@ Eigen::MatrixXd CpuComputeStrategy::Readback()
         }
     }
     return _lambdaResults;
-}
-
-Eigen::MatrixXd CpuComputeStrategy::ComputeInteriorDistanceWeights() const
-{
-    const Eigen::Index N_source = _interiorDistMatrix.rows();
-    const Eigen::Index N_cage   = _interiorDistMatrix.cols();
-    Eigen::MatrixXd result(N_source, N_cage);
-
-    // Large distance threshold — values above this fall back to Euclidean distance.
-    // (Occurs when a source vertex has no interior path to a cage vertex.)
-    constexpr float kUnreachable = 1e7f;
-    constexpr double kEps = 1e-8;
-
-    for (Eigen::Index i = 0; i < N_source; ++i)
-    {
-        double wsum = 0.0;
-        for (Eigen::Index j = 0; j < N_cage; ++j)
-        {
-            float d = _interiorDistMatrix(static_cast<int>(i), static_cast<int>(j));
-            if (!std::isfinite(d) || d > kUnreachable)
-            {
-                // Euclidean fallback for unreachable pairs
-                const Eigen::Vector3d src  = _deformableMesh._vertices.row(static_cast<int>(i)).transpose();
-                const Eigen::Vector3d cage = _cageMesh._vertices.row(static_cast<int>(j)).transpose();
-                d = static_cast<float>((src - cage).norm());
-            }
-            const double w = 1.0 / std::max(static_cast<double>(d), kEps);
-            result(i, j) = w;
-            wsum += w;
-        }
-        if (wsum > kEps)
-            result.row(i) /= wsum;
-        else
-            result.row(i).setConstant(1.0 / static_cast<double>(N_cage));
-    }
-    return result;
 }
 
 void CpuComputeStrategy::AllocateResources()

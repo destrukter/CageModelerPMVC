@@ -8,6 +8,7 @@
 #include <Editor/Light.h>
 #include <cstddef>
 #include <Rendering/PMVC/CpuComputeStrategy.h>
+#include <Rendering/PMVC/InteriorGeodesicDistance.h>
 #include <Rendering/PMVC/GpuAtomicComputeStrategy.h>
 #include <Rendering/PMVC/CubemapManager.h>
 #include <Rendering/PMVC/DebugCubemapComputeStrategy.h>
@@ -324,8 +325,7 @@ void CubemapRenderInstance::Initialize() {
 			_cageMesh,
 			_deformableMesh,
 			_pmvcUseOffset,
-			_targetCount,
-			_pmvcUseInteriorDistance
+			_targetCount
 		);
 	}
 
@@ -1468,5 +1468,61 @@ void CubemapRenderInstance::ComputeCoordinates(
 	}
 	else if (_computeType == PMVCComputeType::Cpu) {
 		ComputeCoordinatesCpu(range, weights);
+	}
+
+	// Interior geodesic distance weighting is applied uniformly on the CPU to the
+	// final weight matrix, independent of whether a GPU or CPU path produced it.
+	if (_pmvcUseInteriorDistance)
+	{
+		ApplyInteriorDistanceWeights(weights);
+	}
+}
+
+void CubemapRenderInstance::ApplyInteriorDistanceWeights(Eigen::MatrixXd& weights) const
+{
+	const Eigen::MatrixXf distMatrix = InteriorGeodesicDistance::Compute(
+		_cageMesh._vertices,
+		_cageMesh._faces,
+		_deformableMesh._vertices);
+
+	const Eigen::Index N_source = distMatrix.rows();
+	const Eigen::Index N_cage = distMatrix.cols();
+	if (N_source == 0 || N_cage == 0)
+	{
+		return;
+	}
+
+	weights.resize(N_source, N_cage);
+
+	// Large distance threshold — values above this fall back to Euclidean distance.
+	// (Occurs when a source vertex has no interior path to a cage vertex.)
+	constexpr float kUnreachable = 1e7f;
+	constexpr double kEps = 1e-8;
+
+	for (Eigen::Index i = 0; i < N_source; ++i)
+	{
+		double wsum = 0.0;
+		for (Eigen::Index j = 0; j < N_cage; ++j)
+		{
+			float d = distMatrix(static_cast<int>(i), static_cast<int>(j));
+			if (!std::isfinite(d) || d > kUnreachable)
+			{
+				// Euclidean fallback for unreachable pairs.
+				const Eigen::Vector3d src = _deformableMesh._vertices.row(static_cast<int>(i)).transpose();
+				const Eigen::Vector3d cage = _cageMesh._vertices.row(static_cast<int>(j)).transpose();
+				d = static_cast<float>((src - cage).norm());
+			}
+			const double w = 1.0 / std::max(static_cast<double>(d), kEps);
+			weights(i, j) = w;
+			wsum += w;
+		}
+		if (wsum > kEps)
+		{
+			weights.row(i) /= wsum;
+		}
+		else
+		{
+			weights.row(i).setConstant(1.0 / static_cast<double>(N_cage));
+		}
 	}
 }
