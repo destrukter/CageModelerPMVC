@@ -29,7 +29,7 @@ public:
         EigenMesh& deformableMesh,
         bool offset,
         uint32_t targetCount,
-        bool useInteriorDistance = false)
+        bool useInteriorDistance = true)
         : _device(device)
         , _transferQueueFamily(transferQueueFamily)
         , _faceSize(faceSize)
@@ -109,6 +109,6 @@ private:
     uint32_t _maxTargetCount = 64;
 
     // Interior geodesic distance weighting
-    bool _useInteriorDistance = false;
+    bool _useInteriorDistance = true;
     Eigen::MatrixXf _interiorDistMatrix;  // (N_source x N_cage), populated in Initialize()
 };

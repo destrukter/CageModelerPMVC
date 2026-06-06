@@ -60,6 +60,7 @@ void CpuComputeStrategy::Initialize()
 
     if (_useInteriorDistance)
     {
+        LOG_DEBUG("Computing interior distanaces!");
         _interiorDistMatrix = InteriorGeodesicDistance::Compute(
             _cageMesh._vertices,
             _cageMesh._faces,

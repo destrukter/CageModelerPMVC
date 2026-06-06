@@ -76,6 +76,7 @@ inline Eigen::MatrixXf InteriorGeodesicDistance::Compute(
     const Eigen::MatrixXd& sourceVerts,
     int targetVoxelResolution)
 {
+    LOG_DEBUG("Interior distance computed...");
     const int N_cage   = static_cast<int>(cageVerts.rows());
     const int N_source = static_cast<int>(sourceVerts.rows());
 
