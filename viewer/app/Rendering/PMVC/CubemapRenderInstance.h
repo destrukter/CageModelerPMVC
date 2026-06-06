@@ -146,6 +146,11 @@ private:
 	void ComputeCoordinatesCpu(
 		const CubemapWorkRange& range, Eigen::MatrixXd& weights);
 
+	// Replaces the computed PMVC weights with inverse interior-geodesic-distance
+	// weights. Applied on the CPU to the final weight matrix regardless of which
+	// compute path (GPU or CPU) produced it.
+	void ApplyInteriorDistanceWeights(Eigen::MatrixXd& weights) const;
+
 	//render resources
 	CubemapRenderUnit _cubemapRenderUnit;
 	VkCommandPool _graphicCommandPool;

@@ -318,13 +318,11 @@ void NewProjectPanel::Layout()
 					ImGui::TableSetColumnIndex(0);
 					ImGui::TextEx("Interior Distance");
 					ImGui::SameLine();
-					UIHelpers::HelpMarker("Use interior geodesic distance weighting instead of solid-angle weighting (CPU compute type only).");
+					UIHelpers::HelpMarker("Use interior geodesic distance weighting instead of solid-angle weighting.");
 
 					ImGui::TableSetColumnIndex(1);
 					UIHelpers::SetRightAligned(25.0f);
-					ImGui::BeginDisabled(_model->_pmvcComputeType != PMVCComputeType::Cpu);
 					ImGui::Checkbox("##PMVCInteriorDist", &_model->_pmvcUseInteriorDistance);
-					ImGui::EndDisabled();
 					ImGui::SameLine();
 				}
 			}
