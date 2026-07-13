@@ -67,6 +67,7 @@ public:
 		uint32_t targetCount,
 		uint32_t hitCount,
 		bool omitNegative,
+		const Eigen::MatrixXf* interiorDistances,
 
 		RenderResourceRef<Device> device,
 		RenderResourceRef<DescriptorPool> descriptorPool,
@@ -112,6 +113,11 @@ private:
 	
 	//offset
 	bool _pmvcUseOffset;
+
+	// Interior distance table (rows = cage vertices, cols = mesh vertices); when set the
+	// compute strategies use the heat-method interior distances instead of the rasterized
+	// Euclidean depth. Owned by the CubemapManager, must outlive this instance.
+	const Eigen::MatrixXf* _interiorDistances = nullptr;
 
 	//parameters 
 	unsigned int _cubemapSize;

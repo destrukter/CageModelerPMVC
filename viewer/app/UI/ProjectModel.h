@@ -33,6 +33,7 @@ struct ProjectModelData
 		_pmvcTargetCount = other._pmvcTargetCount;
 		_pmvcHitCount = other._pmvcHitCount;
 		_pmvcOmitNegative = other._pmvcOmitNegative;
+		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
 	}
 
 	ProjectModelData(ProjectModelData&& other) noexcept
@@ -83,6 +84,7 @@ struct ProjectModelData
 		swap(lhs._pmvcTargetCount, rhs._pmvcTargetCount);
 		swap(lhs._pmvcHitCount, rhs._pmvcHitCount);
 		swap(lhs._pmvcOmitNegative, rhs._pmvcOmitNegative);
+		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -128,7 +130,8 @@ struct ProjectModelData
 			lhs._cubemapSize == rhs._cubemapSize &&
 			lhs._pmvcTargetCount == rhs._pmvcTargetCount &&
 			lhs._pmvcHitCount == rhs._pmvcHitCount &&
-			lhs._pmvcOmitNegative == rhs._pmvcOmitNegative;
+			lhs._pmvcOmitNegative == rhs._pmvcOmitNegative &&
+			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -198,6 +201,9 @@ struct ProjectModelData
 	uint64_t _pmvcTargetCount = 64;
 	uint64_t _pmvcHitCount = 1;
 	bool _pmvcOmitNegative = true;
+	/// Weight PMVC with heat-method interior distances instead of the rasterized
+	/// (Euclidean) depth. Ignored by the offset (PMVCO) variant.
+	bool _pmvcUseInteriorDistance = false;
 
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;
 

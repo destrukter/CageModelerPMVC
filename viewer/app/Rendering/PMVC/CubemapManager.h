@@ -57,7 +57,8 @@ public:
 		bool useOffset,
 		uint32_t targetCount = 64,
 		uint32_t hitCount = 3,
-		bool omitNegative = true);
+		bool omitNegative = true,
+		bool useInteriorDistance = false);
 	void DebugRenderCubemaps();
 	void DebugComputeCoordinates();
 
@@ -88,6 +89,14 @@ private:
 	//geodata:
 	EigenMesh _cageMesh;
 	EigenMesh _deformableMesh;
+
+	// Heat-method interior distance table (rows = cage vertices, cols = mesh vertices).
+	// Computed lazily when interior-distance PMVC is requested and memoized on the cage
+	// topology: cage vertex positions moving during deformation do not invalidate it,
+	// only topology changes (vertex/face count, face indices) trigger a recompute.
+	void EnsureInteriorDistanceTable();
+	Eigen::MatrixXf _interiorDistances;
+	std::size_t _interiorDistanceTableHash = 0;
 
 	bool init = false;
 

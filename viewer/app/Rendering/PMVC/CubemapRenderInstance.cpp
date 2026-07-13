@@ -121,6 +121,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	uint32_t targetCount,
 	uint32_t hitCount,
 	bool omitNegative,
+	const Eigen::MatrixXf* interiorDistances,
 
 	RenderResourceRef<Device> device,
 	RenderResourceRef<DescriptorPool> descriptorPool,
@@ -149,6 +150,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _targetCount(targetCount == 0 ? 1u : targetCount)
 , _hitCount(hitCount == 0 ? 1u : hitCount)
 , _omitNegative(omitNegative)
+, _interiorDistances(interiorDistances)
 , _device(std::move(device))
 , _descriptorPool(std::move(descriptorPool))
 , _resourceManager(std::move(resourceManager))
@@ -328,6 +330,15 @@ void CubemapRenderInstance::Initialize() {
 
 	uint32_t graphicsQueueFamilyIndex = _device->GetQueueFamilies()._graphics.value();
 	CreateCommandPool(graphicsQueueFamilyIndex);
+
+	if (_interiorDistances != nullptr)
+	{
+		InteriorDistanceSettings interiorSettings{};
+		interiorSettings.distances = _interiorDistances;
+		interiorSettings.nearPlane = _projectionNearPlane;
+		interiorSettings.farPlane = _projectionFarPlane;
+		_computeStage->SetInteriorDistance(interiorSettings);
+	}
 
 	const uint32_t targetCount = _computeStage->RequiredRenderTargetCount();
 	_computeStage->Initialize();
