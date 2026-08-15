@@ -136,6 +136,7 @@ namespace
 		std::optional<float> _pmvcAlpha;
 		std::optional<float> _pmvcBeta;
 		std::optional<float> _pmvcTheta;
+		std::optional<bool> _pmvcUseInteriorDistance;
 		std::optional<std::vector<int32_t>> _vertices;
 	};
 
@@ -322,6 +323,7 @@ namespace
 			project._pmvcAlpha = ExtractJsonFloatValue(objectText, "alpha");
 			project._pmvcBeta = ExtractJsonFloatValue(objectText, "beta");
 			project._pmvcTheta = ExtractJsonFloatValue(objectText, "theta");
+			project._pmvcUseInteriorDistance = ExtractJsonBoolValue(objectText, "useInteriorDistance");
 			project._vertices = ExtractJsonIntArrayValue(objectText, "vertices");
 			if (!project._vertices.has_value())
 			{
@@ -482,6 +484,7 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 	_projectModel->_pmvcAlpha = 1.0f;
 	_projectModel->_pmvcBeta = -1.0f;
 	_projectModel->_pmvcTheta = 1.0f;
+	_projectModel->_pmvcUseInteriorDistance = false;
 	_projectModel->_cubemapSize = 32;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
@@ -553,6 +556,7 @@ void Editor::StartEvaluation()
 		std::optional<int32_t> _pmvcTargetCount;
 		std::optional<int32_t> _pmvcHitCount;
 		std::optional<bool> _pmvcOmitNegative;
+		std::optional<bool> _pmvcUseInteriorDistance;
 	};
 
 	std::vector<EvaluationResult> results;
@@ -599,6 +603,7 @@ void Editor::StartEvaluation()
 		_projectModel->_pmvcAlpha = project._pmvcAlpha.value_or(1.0f);
 		_projectModel->_pmvcBeta = project._pmvcBeta.value_or(-1.0f);
 		_projectModel->_pmvcTheta = project._pmvcTheta.value_or(1.0f);
+		_projectModel->_pmvcUseInteriorDistance = project._pmvcUseInteriorDistance.value_or(false);
 		_projectModel->ApplyPMVCPreset();
 		// ApplyPMVCPreset() resets the compute type to a preset default, so re-apply
 		// the explicitly requested compute type (e.g. the three-hit variant).
@@ -661,7 +666,8 @@ void Editor::StartEvaluation()
 				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(1)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseInteriorDistance.value_or(false)) : std::nullopt });
 			continue;
 		}
 
@@ -727,7 +733,8 @@ void Editor::StartEvaluation()
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(1)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseInteriorDistance.value_or(false)) : std::nullopt });
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
@@ -809,6 +816,10 @@ void Editor::StartEvaluation()
 		if (result._pmvcOmitNegative.has_value())
 		{
 			timingOutput << ",\n      \"omitNegative\": " << (result._pmvcOmitNegative.value() ? "true" : "false");
+		}
+		if (result._pmvcUseInteriorDistance.has_value())
+		{
+			timingOutput << ",\n      \"useInteriorDistance\": " << (result._pmvcUseInteriorDistance.value() ? "true" : "false");
 		}
 		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
 	}
@@ -1235,6 +1246,7 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 					projectModelSnapshot->_pmvcAlpha,
 					projectModelSnapshot->_pmvcBeta,
 					projectModelSnapshot->_pmvcTheta));
+					projectModelSnapshot->_pmvcUseInteriorDistance));
 					//promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_deformationType));
 				}
 				catch (...)

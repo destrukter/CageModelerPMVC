@@ -77,6 +77,7 @@ public:
 		float alpha,
 		float beta,
 		float theta,
+		const Eigen::MatrixXf* interiorDetours,
 
 		RenderResourceRef<Device> device,
 		RenderResourceRef<DescriptorPool> descriptorPool,
@@ -125,6 +126,12 @@ private:
 	
 	//offset
 	bool _pmvcUseOffset;
+
+	// Interior detour table (rows = cage vertices, cols = mesh vertices, entries are
+	// interior minus Euclidean distance); when set the compute strategies lengthen the
+	// rasterized hit distance by the interpolated detour. Owned by the CubemapManager,
+	// must outlive this instance.
+	const Eigen::MatrixXf* _interiorDetours = nullptr;
 
 	//parameters 
 	unsigned int _cubemapSize;

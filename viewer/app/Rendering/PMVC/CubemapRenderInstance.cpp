@@ -124,6 +124,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	float alpha,
 	float beta,
 	float theta,
+	const Eigen::MatrixXf* interiorDetours,
 
 	RenderResourceRef<Device> device,
 	RenderResourceRef<DescriptorPool> descriptorPool,
@@ -156,6 +157,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _alpha(alpha)
 , _beta(beta)
 , _theta(theta)
+, _interiorDetours(interiorDetours)
 , _device(std::move(device))
 , _descriptorPool(std::move(descriptorPool))
 , _resourceManager(std::move(resourceManager))
@@ -367,6 +369,15 @@ void CubemapRenderInstance::Initialize() {
 
 	uint32_t graphicsQueueFamilyIndex = _device->GetQueueFamilies()._graphics.value();
 	CreateCommandPool(graphicsQueueFamilyIndex);
+
+	if (_interiorDetours != nullptr)
+	{
+		InteriorDistanceSettings interiorSettings{};
+		interiorSettings.detours = _interiorDetours;
+		interiorSettings.nearPlane = _projectionNearPlane;
+		interiorSettings.farPlane = _projectionFarPlane;
+		_computeStage->SetInteriorDistance(interiorSettings);
+	}
 
 	const uint32_t targetCount = _computeStage->RequiredRenderTargetCount();
 	_computeStage->Initialize();

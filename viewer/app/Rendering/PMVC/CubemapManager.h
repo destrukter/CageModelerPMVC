@@ -61,6 +61,7 @@ public:
 		float alpha = 1.0f,
 		float beta = -1.0f,
 		float theta = 1.0f);
+		bool useInteriorDistance = false);
 	void DebugRenderCubemaps();
 	void DebugComputeCoordinates();
 
@@ -91,6 +92,16 @@ private:
 	//geodata:
 	EigenMesh _cageMesh;
 	EigenMesh _deformableMesh;
+
+	// Heat-method interior detour table (rows = cage vertices, cols = mesh vertices):
+	// each entry is interior distance minus Euclidean distance (>= 0), zero wherever the
+	// cage is convex from the mesh vertex. Computed lazily when interior-distance PMVC is
+	// requested and memoized on the cage topology: cage vertex positions moving during
+	// deformation do not invalidate it, only topology changes (vertex/face count, face
+	// indices) trigger a recompute.
+	void EnsureInteriorDistanceTable();
+	Eigen::MatrixXf _interiorDetours;
+	std::size_t _interiorDistanceTableHash = 0;
 
 	bool init = false;
 

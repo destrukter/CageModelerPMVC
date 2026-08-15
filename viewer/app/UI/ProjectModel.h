@@ -36,6 +36,7 @@ struct ProjectModelData
 		_pmvcAlpha = other._pmvcAlpha;
 		_pmvcBeta = other._pmvcBeta;
 		_pmvcTheta = other._pmvcTheta;
+		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
 	}
 
 	ProjectModelData(ProjectModelData&& other) noexcept
@@ -89,6 +90,7 @@ struct ProjectModelData
 		swap(lhs._pmvcAlpha, rhs._pmvcAlpha);
 		swap(lhs._pmvcBeta, rhs._pmvcBeta);
 		swap(lhs._pmvcTheta, rhs._pmvcTheta);
+		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -138,6 +140,7 @@ struct ProjectModelData
 			lhs._pmvcAlpha == rhs._pmvcAlpha &&
 			lhs._pmvcBeta == rhs._pmvcBeta &&
 			lhs._pmvcTheta == rhs._pmvcTheta;
+			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -165,6 +168,10 @@ struct ProjectModelData
 			{
 				_pmvcComputeType = PMVCComputeType::Ring;
 			}
+			// The single-hit atomic strategy (Ring) has no hit loop; only the depth
+			// peeling strategy (All) consumes the hit count, so multi-hit requests must
+			// be routed there or the configured hit count would silently be ignored.
+			_pmvcComputeType = _pmvcHitCount > 1 ? PMVCComputeType::All : PMVCComputeType::Ring;
 			_pmvcUseOffset = false;
 			_pmvcTargetCount = 64;
 			_pmvcOmitNegative = true;
@@ -212,6 +219,9 @@ struct ProjectModelData
 	uint64_t _pmvcTargetCount = 64;
 	uint64_t _pmvcHitCount = 1;
 	bool _pmvcOmitNegative = true;
+	/// Weight PMVC with heat-method interior distances instead of the rasterized
+	/// (Euclidean) depth. Ignored by the offset (PMVCO) variant.
+	bool _pmvcUseInteriorDistance = false;
 
 	/// Three-hit PMVC variant weights. The first hit is weighted by alpha, the
 	/// second hit by beta (subtracted by default) and the third hit by theta.
