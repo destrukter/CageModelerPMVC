@@ -133,6 +133,9 @@ namespace
 		std::optional<int32_t> _pmvcTargetCount;
 		std::optional<int32_t> _pmvcHitCount;
 		std::optional<bool> _pmvcOmitNegative;
+		std::optional<float> _pmvcAlpha;
+		std::optional<float> _pmvcBeta;
+		std::optional<float> _pmvcTheta;
 		std::optional<bool> _pmvcUseInteriorDistance;
 		std::optional<std::vector<int32_t>> _vertices;
 	};
@@ -172,6 +175,17 @@ namespace
 		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
 		{
 			return static_cast<int32_t>(std::stoi(match[1].str()));
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::optional<float> ExtractJsonFloatValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return std::stof(match[1].str());
 		}
 		return std::nullopt;
 	}
@@ -306,6 +320,9 @@ namespace
 			project._pmvcTargetCount = ExtractJsonIntValue(objectText, "targetCount");
 			project._pmvcHitCount = ExtractJsonIntValue(objectText, "hitCount");
 			project._pmvcOmitNegative = ExtractJsonBoolValue(objectText, "omitNegative");
+			project._pmvcAlpha = ExtractJsonFloatValue(objectText, "alpha");
+			project._pmvcBeta = ExtractJsonFloatValue(objectText, "beta");
+			project._pmvcTheta = ExtractJsonFloatValue(objectText, "theta");
 			project._pmvcUseInteriorDistance = ExtractJsonBoolValue(objectText, "useInteriorDistance");
 			project._vertices = ExtractJsonIntArrayValue(objectText, "vertices");
 			if (!project._vertices.has_value())
@@ -392,7 +409,8 @@ namespace
 			{ "serial", PMVCComputeType::Serial },
 			{ "ring", PMVCComputeType::Ring },
 			{ "all", PMVCComputeType::All },
-			{ "cpu", PMVCComputeType::Cpu }
+			{ "cpu", PMVCComputeType::Cpu },
+			{ "threehit", PMVCComputeType::ThreeHit }
 		};
 		const auto it = mapping.find(ToLower(value));
 		if (it == mapping.end())
@@ -456,11 +474,16 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCreated(); });
 
 	_projectModel->_deformationType = DeformationType::PMVC;
-	_projectModel->_pmvcComputeType = PMVCComputeType::Ring;
+	// Use the three-hit PMVC variant for the default startup project so the new
+	// per-ray combined-hit implementation is exercised on launch.
+	_projectModel->_pmvcComputeType = PMVCComputeType::ThreeHit;
 	_projectModel->_pmvcUseOffset = false;
 	_projectModel->_pmvcTargetCount = 64;
-	_projectModel->_pmvcHitCount = 1;
+	_projectModel->_pmvcHitCount = 3;
 	_projectModel->_pmvcOmitNegative = true;
+	_projectModel->_pmvcAlpha = 1.0f;
+	_projectModel->_pmvcBeta = -1.0f;
+	_projectModel->_pmvcTheta = 1.0f;
 	_projectModel->_pmvcUseInteriorDistance = false;
 	_projectModel->_cubemapSize = 32;
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
@@ -577,8 +600,14 @@ void Editor::StartEvaluation()
 		_projectModel->_pmvcTargetCount = project._pmvcTargetCount.value_or(64);
 		_projectModel->_pmvcHitCount = project._pmvcHitCount.value_or(1);
 		_projectModel->_pmvcOmitNegative = project._pmvcOmitNegative.value_or(true);
+		_projectModel->_pmvcAlpha = project._pmvcAlpha.value_or(1.0f);
+		_projectModel->_pmvcBeta = project._pmvcBeta.value_or(-1.0f);
+		_projectModel->_pmvcTheta = project._pmvcTheta.value_or(1.0f);
 		_projectModel->_pmvcUseInteriorDistance = project._pmvcUseInteriorDistance.value_or(false);
 		_projectModel->ApplyPMVCPreset();
+		// ApplyPMVCPreset() resets the compute type to a preset default, so re-apply
+		// the explicitly requested compute type (e.g. the three-hit variant).
+		_projectModel->_pmvcComputeType = ParsePMVCComputeType(project._pmvcComputeType).value_or(_projectModel->_pmvcComputeType);
 
 		const auto start = std::chrono::steady_clock::now();
 
@@ -1214,6 +1243,9 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 					static_cast<uint32_t>(projectModelSnapshot->_pmvcTargetCount),
 					static_cast<uint32_t>(projectModelSnapshot->_pmvcHitCount),
 					projectModelSnapshot->_pmvcOmitNegative,
+					projectModelSnapshot->_pmvcAlpha,
+					projectModelSnapshot->_pmvcBeta,
+					projectModelSnapshot->_pmvcTheta));
 					projectModelSnapshot->_pmvcUseInteriorDistance));
 					//promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_deformationType));
 				}

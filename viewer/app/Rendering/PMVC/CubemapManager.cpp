@@ -510,6 +510,9 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	const uint32_t targetCount,
 	const uint32_t hitCount,
 	const bool omitNegative,
+	const float alpha,
+	const float beta,
+	const float theta) {
 	const bool useInteriorDistance) {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
@@ -554,6 +557,9 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		targetCount,
 		hitCount,
 		omitNegative,
+		alpha,
+		beta,
+		theta,
 		interiorDetours,
 
 		_device,

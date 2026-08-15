@@ -58,6 +58,9 @@ public:
 		uint32_t targetCount = 64,
 		uint32_t hitCount = 3,
 		bool omitNegative = true,
+		float alpha = 1.0f,
+		float beta = -1.0f,
+		float theta = 1.0f);
 		bool useInteriorDistance = false);
 	void DebugRenderCubemaps();
 	void DebugComputeCoordinates();

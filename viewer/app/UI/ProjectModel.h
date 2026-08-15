@@ -33,6 +33,9 @@ struct ProjectModelData
 		_pmvcTargetCount = other._pmvcTargetCount;
 		_pmvcHitCount = other._pmvcHitCount;
 		_pmvcOmitNegative = other._pmvcOmitNegative;
+		_pmvcAlpha = other._pmvcAlpha;
+		_pmvcBeta = other._pmvcBeta;
+		_pmvcTheta = other._pmvcTheta;
 		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
 	}
 
@@ -84,6 +87,9 @@ struct ProjectModelData
 		swap(lhs._pmvcTargetCount, rhs._pmvcTargetCount);
 		swap(lhs._pmvcHitCount, rhs._pmvcHitCount);
 		swap(lhs._pmvcOmitNegative, rhs._pmvcOmitNegative);
+		swap(lhs._pmvcAlpha, rhs._pmvcAlpha);
+		swap(lhs._pmvcBeta, rhs._pmvcBeta);
+		swap(lhs._pmvcTheta, rhs._pmvcTheta);
 		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
 	}
 
@@ -131,6 +137,9 @@ struct ProjectModelData
 			lhs._pmvcTargetCount == rhs._pmvcTargetCount &&
 			lhs._pmvcHitCount == rhs._pmvcHitCount &&
 			lhs._pmvcOmitNegative == rhs._pmvcOmitNegative &&
+			lhs._pmvcAlpha == rhs._pmvcAlpha &&
+			lhs._pmvcBeta == rhs._pmvcBeta &&
+			lhs._pmvcTheta == rhs._pmvcTheta;
 			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance;
 	}
 
@@ -153,6 +162,12 @@ struct ProjectModelData
 	{
 		if (_deformationType == DeformationType::PMVC)
 		{
+			// Preserve an explicitly selected three-hit variant (and its hit count)
+			// instead of forcing the Ring preset.
+			if (_pmvcComputeType != PMVCComputeType::ThreeHit)
+			{
+				_pmvcComputeType = PMVCComputeType::Ring;
+			}
 			// The single-hit atomic strategy (Ring) has no hit loop; only the depth
 			// peeling strategy (All) consumes the hit count, so multi-hit requests must
 			// be routed there or the configured hit count would silently be ignored.
@@ -207,6 +222,12 @@ struct ProjectModelData
 	/// Weight PMVC with heat-method interior distances instead of the rasterized
 	/// (Euclidean) depth. Ignored by the offset (PMVCO) variant.
 	bool _pmvcUseInteriorDistance = false;
+
+	/// Three-hit PMVC variant weights. The first hit is weighted by alpha, the
+	/// second hit by beta (subtracted by default) and the third hit by theta.
+	float _pmvcAlpha = 1.0f;
+	float _pmvcBeta = -1.0f;
+	float _pmvcTheta = 1.0f;
 
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;
 
