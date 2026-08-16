@@ -164,3 +164,57 @@ results/<stem>/interior_distance_map.obj        if interiorDistanceMap is on
 
 Each color map is written next to a `_vertices.txt` listing the cage vertices it was
 exported for, so an export can be traced back to its selection.
+
+## Viewing the color maps
+
+The maps are the deformed mesh with one color baked per vertex, written as OBJ with the
+`v x y z r g b` vertex color extension and a header describing the mapping:
+
+```
+# Distance field color map: euclidean distance from cage vertex 1
+# Gradient: viridis over [0, 2.471] (maximum of the data set)
+# Largest distance in the data set: 2.471
+# Isolines: every 0.05 world units, every 5th emphasized
+v 0.10 0.20 0.30 0.267004 0.004874 0.329415
+f 1 2 3
+```
+
+There is no material, no UV and no normals: everything is in the vertex colors. The
+distance maps use the viridis gradient with the isolines baked in as pink strokes; the
+influence map uses a blue-to-red hue ramp on a logarithmic scale, so its colors are not
+linear in the weight.
+
+Any viewer that reads OBJ vertex colors works. MeshLab shows them with no setup. In
+Blender (the OBJ importer reads this extension in recent versions, 3.4 and newer):
+
+1. Import the `.obj`. The colors arrive as a **Color Attribute** on the mesh, under Object
+   Data Properties.
+2. Solid shading ignores it and the mesh looks flat grey, which is the usual "my colors
+   are missing" moment. Set **Viewport Shading → Solid → Color → Attribute**.
+3. For Material Preview or a render, give the object a material with a **Color Attribute**
+   node. Wire it into an **Emission** shader rather than Base Color, so lighting and
+   shading do not distort the gradient.
+
+If the colors import but look washed out or too dark, that is a color space mismatch
+between how the values were written (raw 0..1) and how the color attribute is interpreted;
+compare against MeshLab to tell a color space problem apart from a data problem.
+
+### Comparing two maps
+
+By default each export normalizes against its own largest distance, which the header
+records as `(maximum of the data set)`. Two maps of the same model therefore use the full
+gradient over *different* ranges, and reading one against the other is misleading. Set
+`distance_max` on the coordinate setup to pin both to the same range:
+
+```python
+CoordinateSetup(
+    name="pmvc_interior",
+    coordinate_type="PMVC",
+    hit_count=1,
+    use_interior_distance=True,
+    distance_max=2.5,          # the header then reads "(fixed maximum)"
+)
+```
+
+Because the isolines are baked per vertex, they are only as sharp as the mesh is dense; on
+a coarse mesh they read as bands rather than lines.
