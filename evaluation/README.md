@@ -34,15 +34,44 @@ Use `--dry-run` to validate the configuration without writing anything.
 The viewer resolves `evaluation` relative to its working directory, and the mesh paths
 inside a config are relative to that `evaluation` directory in turn. It therefore has to
 run from the directory holding both `assets/` and `evaluation/`, which is where CMake puts
-the executable and the packaged meshes:
+the executable and the packaged meshes — call it the run directory:
+
+```
+build/<preset>/bin/viewer/app/
+```
+
+The build does not put an `evaluation` directory there, so a generated config has to be
+reachable from it. The simplest way is to generate straight into the run directory, which
+needs no symlink and no special privileges:
 
 ```sh
+python3 evaluation/gen_eval_configs.py \
+    --output-dir build/<preset>/bin/viewer/app/evaluation/generated
+```
+
+`--output-dir` and `--asset-root` are relative to the current working directory, unlike
+the `OUTPUT_DIR` and `ASSET_ROOT` constants, which are relative to the script.
+
+Alternatively link the source `evaluation` directory into the run directory once, and
+regenerate normally from then on:
+
+```sh
+# Linux / macOS
 cd build/<preset>/bin/viewer/app
-ln -s ../../../../../evaluation evaluation      # once, the build does not copy it
+ln -s ../../../../../evaluation evaluation
+```
+
+```bat
+REM Windows, a junction needs no administrator rights
+cd build\<preset>\bin\viewer\app
+mklink /J evaluation ..\..\..\..\..\evaluation
 ```
 
 The evaluation runs during startup, so launching the viewer with a config in place starts
-it immediately. A missing config is logged and skipped rather than being an error.
+it immediately. A missing config is logged and skipped rather than being an error, so
+`does not exist. Skipping evaluation run.` means the path did not resolve — check that the
+run directory really contains `evaluation\generated`, and that the filename matches one
+the generator actually produced (`manifest.json` lists them all).
 
 ## Configuration
 

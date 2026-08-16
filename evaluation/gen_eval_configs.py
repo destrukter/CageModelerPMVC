@@ -800,12 +800,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Override OUTPUT_DIR (relative paths are resolved against this script).",
+        help="Write the configs here instead of OUTPUT_DIR. Use this to generate straight "
+        "into the directory the viewer runs from. Relative paths are resolved against the "
+        "current working directory.",
     )
     parser.add_argument(
         "--asset-root",
         default=None,
-        help="Override ASSET_ROOT (relative paths are resolved against this script).",
+        help="Validate against the mesh files here instead of ASSET_ROOT. Relative paths "
+        "are resolved against the current working directory.",
     )
     parser.add_argument(
         "--dry-run",
@@ -814,9 +817,12 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # The module level constants are relative to this script, so that the defaults keep
+    # working from any working directory, while the command line overrides follow the
+    # usual convention of being relative to the working directory.
     script_dir = Path(__file__).resolve().parent
-    output_dir = (script_dir / (args.output_dir or OUTPUT_DIR)).resolve()
-    asset_root = (script_dir / (args.asset_root or ASSET_ROOT)).resolve()
+    output_dir = (Path(args.output_dir) if args.output_dir else script_dir / OUTPUT_DIR).resolve()
+    asset_root = (Path(args.asset_root) if args.asset_root else script_dir / ASSET_ROOT).resolve()
 
     if not asset_root.is_dir():
         print(
