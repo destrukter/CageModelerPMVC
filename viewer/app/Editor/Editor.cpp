@@ -597,16 +597,54 @@ void Editor::StartEvaluation()
 
 	const auto evaluationRoot = std::filesystem::absolute(kEvaluationRoot);
 
-	// A generated config is run without copying it over the default one, either with
-	// "--eval-config <path>" or with the CAGEMODELER_EVAL_CONFIG environment variable, so
-	// that a batch run can iterate over the generated manifest. Paths inside the config
-	// stay relative to the evaluation directory regardless of where the config itself is.
-	auto configPath = evaluationRoot / kEvaluationConfig;
-	if (const auto configOverride = EvaluationOptions::GetEvaluationConfigPath(); !configOverride.empty())
+	// Generated configs are run without copying them over the default one, either with
+	// "--eval-config <path>" (repeatable, and a directory runs every config in it) or with
+	// the CAGEMODELER_EVAL_CONFIG environment variable. Paths inside a config stay
+	// relative to the evaluation directory regardless of where the config itself is.
+	std::vector<std::filesystem::path> configPaths;
+	for (const auto& configOverride : EvaluationOptions::GetEvaluationConfigPaths())
 	{
-		configPath = std::filesystem::absolute(configOverride);
+		const auto overridePath = std::filesystem::absolute(configOverride);
+		if (!std::filesystem::is_directory(overridePath))
+		{
+			configPaths.push_back(overridePath);
+			continue;
+		}
+
+		// A directory runs every config in it, so a whole generated batch can be
+		// evaluated in one launch without the shell having to expand a wildcard.
+		for (const auto& entry : std::filesystem::directory_iterator(overridePath))
+		{
+			// The manifest describes the batch, it is not a config itself.
+			if (entry.path().extension() == ".json" && entry.path().filename() != "manifest.json")
+			{
+				configPaths.push_back(entry.path());
+			}
+		}
 	}
 
+	if (configPaths.empty())
+	{
+		configPaths.push_back(evaluationRoot / kEvaluationConfig);
+	}
+
+	// Directory iteration order is unspecified, so a batch would otherwise run in a
+	// different order on every machine.
+	std::sort(configPaths.begin(), configPaths.end());
+
+	for (std::size_t configIndex = 0; configIndex < configPaths.size(); ++configIndex)
+	{
+		if (configPaths.size() > 1)
+		{
+			LOG_INFO("Running evaluation config {} of {}: '{}'.", configIndex + 1, configPaths.size(), configPaths[configIndex].string());
+		}
+
+		RunEvaluationConfig(configPaths[configIndex], evaluationRoot);
+	}
+}
+
+void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const std::filesystem::path& evaluationRoot)
+{
 	if (!std::filesystem::exists(configPath))
 	{
 		LOG_WARN("Evaluation config '{}' does not exist. Skipping evaluation run.", configPath.string());

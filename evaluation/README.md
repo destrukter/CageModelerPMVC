@@ -17,12 +17,28 @@ build of the viewer.
    It writes one config per (model entry x coordinate setup) pair into
    `evaluation/generated/`, plus a `manifest.json` listing all of them.
 
-3. Run one config, or loop over the manifest:
+3. Run the whole batch in one launch by pointing at the directory:
 
    ```sh
-   ./CageModeler --eval-config evaluation/generated/<name>.json
-   # or
-   CAGEMODELER_EVAL_CONFIG=evaluation/generated/<name>.json ./CageModeler
+   ./CageModeler --eval-config evaluation/generated
+   ```
+
+   A directory runs every `*.json` in it, in sorted order, skipping `manifest.json`. Each
+   config keeps its own timings file and its own output directory, exactly as when run on
+   its own, so a batch and a series of single runs produce the same files.
+
+   To run a subset instead, name the configs — the flag may be repeated:
+
+   ```sh
+   ./CageModeler --eval-config evaluation/generated/<a>.json \
+                 --eval-config evaluation/generated/<b>.json
+   ```
+
+   The environment variable takes the same values, several separated by the platform's
+   path list separator (`;` on Windows, `:` elsewhere):
+
+   ```sh
+   CAGEMODELER_EVAL_CONFIG=evaluation/generated ./CageModeler
    ```
 
    Without an override the viewer falls back to `evaluation/projects.json`.

@@ -10,7 +10,35 @@ namespace EvaluationOptions
 		constexpr std::string_view kEvaluationConfigFlag = "--eval-config";
 		constexpr auto kEvaluationConfigEnvironmentVariable = "CAGEMODELER_EVAL_CONFIG";
 
-		std::string GEvaluationConfigPath;
+		// Windows separates path lists with ';' because ':' follows a drive letter.
+#ifdef _WIN32
+		constexpr auto kPathListSeparator = ';';
+#else
+		constexpr auto kPathListSeparator = ':';
+#endif
+
+		std::vector<std::string> GEvaluationConfigPaths;
+
+		void SplitPathList(const std::string& value, std::vector<std::string>& outPaths)
+		{
+			std::string::size_type begin = 0;
+			while (begin <= value.size())
+			{
+				const auto end = value.find(kPathListSeparator, begin);
+				auto entry = value.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+				if (!entry.empty())
+				{
+					outPaths.push_back(std::move(entry));
+				}
+
+				if (end == std::string::npos)
+				{
+					break;
+				}
+
+				begin = end + 1;
+			}
+		}
 	}
 
 	void ParseCommandLine(const int argc, char** argv)
@@ -29,28 +57,29 @@ namespace EvaluationOptions
 				// "--eval-config <path>", the path is the next argument.
 				if (i + 1 < argc)
 				{
-					GEvaluationConfigPath = argv[++i];
+					GEvaluationConfigPaths.emplace_back(argv[++i]);
 				}
 			}
 			else if (remainder.front() == '=')
 			{
-				GEvaluationConfigPath = remainder.substr(1);
+				GEvaluationConfigPaths.emplace_back(remainder.substr(1));
 			}
 		}
 	}
 
-	std::string GetEvaluationConfigPath()
+	std::vector<std::string> GetEvaluationConfigPaths()
 	{
-		if (!GEvaluationConfigPath.empty())
+		if (!GEvaluationConfigPaths.empty())
 		{
-			return GEvaluationConfigPath;
+			return GEvaluationConfigPaths;
 		}
 
-		if (const auto* const fromEnvironment = std::getenv(kEvaluationConfigEnvironmentVariable))
+		std::vector<std::string> fromEnvironment;
+		if (const auto* const value = std::getenv(kEvaluationConfigEnvironmentVariable))
 		{
-			return fromEnvironment;
+			SplitPathList(value, fromEnvironment);
 		}
 
-		return { };
+		return fromEnvironment;
 	}
 }
