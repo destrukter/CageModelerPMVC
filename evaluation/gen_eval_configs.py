@@ -141,72 +141,41 @@ RESULTS_PREFIX = "results/"
 
 MODEL_ENTRIES = [
     ModelEntry(
+        # Paths are relative to ASSET_ROOT and CONFIG_PATH_PREFIX, so the "meshes"
+        # directory is already part of the prefix and is not repeated here.
         name="armadillo",
         mesh="armadilloman.obj",
         cage="armadilloman_cages_triangulated.obj",
         deformed_cages=[
             "armadilloman_cages_triangulated_deformed_1.obj",
-            "armadilloman_cages_triangulated_deformed_5.obj",
-            "armadilloman_cages_triangulated_deformed_8.obj",
         ],
+        # All three maps, measured from cage vertex 1.
         influence_map=True,
-        influence_vertices=[0, 1, 2],
+        influence_vertices=[1],
         euclidean_distance_map=True,
-        euclidean_vertex=0,
+        euclidean_vertex=1,
         interior_distance_map=True,
-        interior_vertex=0,
-    ),
-    ModelEntry(
-        name="cactus",
-        mesh="cactus.obj",
-        cage="cactus_cages_triangulated.obj",
-        deformed_cages=[
-            "cactus_cages_triangulated_deformed.obj",
-        ],
-        embedding="cactus_cages_triangulated_embedding.msh",
-        influence_map=True,
-        influence_vertices=[0],
-        euclidean_distance_map=True,
-        euclidean_vertex=0,
-        interior_distance_map=False,
-        interior_vertex=None,
+        interior_vertex=1,
     ),
 ]
 
 
 COORDINATE_SETUPS = [
     CoordinateSetup(
-        name="mvc",
-        coordinate_type="MVC",
-    ),
-    CoordinateSetup(
-        name="green",
-        coordinate_type="Green",
-    ),
-    CoordinateSetup(
-        name="pmvc_1hit",
+        name="pmvc_3hit_a1_b0_t1",
         coordinate_type="PMVC",
-        hit_count=1,
+        hit_count=3,
+        alpha=1.0,
+        beta=0.0,
+        theta=1.0,
     ),
     CoordinateSetup(
-        name="pmvc_3hit",
+        name="pmvc_3hit_a1_bm1_t1",
         coordinate_type="PMVC",
         hit_count=3,
         alpha=1.0,
         beta=-1.0,
         theta=1.0,
-    ),
-    CoordinateSetup(
-        name="pmvc_interior",
-        coordinate_type="PMVC",
-        hit_count=1,
-        use_interior_distance=True,
-        distance_interval=0.05,
-        distance_emphasis=5,
-    ),
-    CoordinateSetup(
-        name="pmvco",
-        coordinate_type="PMVCO",
     ),
 ]
 
