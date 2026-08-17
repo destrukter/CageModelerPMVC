@@ -601,8 +601,10 @@ void Editor::StartEvaluation()
 	// "--eval-config <path>" (repeatable, and a directory runs every config in it) or with
 	// the CAGEMODELER_EVAL_CONFIG environment variable. Paths inside a config stay
 	// relative to the evaluation directory regardless of where the config itself is.
+	const auto configOverrides = EvaluationOptions::GetEvaluationConfigPaths();
+
 	std::vector<std::filesystem::path> configPaths;
-	for (const auto& configOverride : EvaluationOptions::GetEvaluationConfigPaths())
+	for (const auto& configOverride : configOverrides)
 	{
 		const auto overridePath = std::filesystem::absolute(configOverride);
 		if (!std::filesystem::is_directory(overridePath))
@@ -613,14 +615,30 @@ void Editor::StartEvaluation()
 
 		// A directory runs every config in it, so a whole generated batch can be
 		// evaluated in one launch without the shell having to expand a wildcard.
+		std::size_t foundInDirectory = 0;
 		for (const auto& entry : std::filesystem::directory_iterator(overridePath))
 		{
 			// The manifest describes the batch, it is not a config itself.
 			if (entry.path().extension() == ".json" && entry.path().filename() != "manifest.json")
 			{
 				configPaths.push_back(entry.path());
+				++foundInDirectory;
 			}
 		}
+
+		if (foundInDirectory == 0)
+		{
+			LOG_WARN("The evaluation config directory '{}' contains no configs.", overridePath.string());
+		}
+	}
+
+	// Falling back to the default config after an override was asked for would quietly run
+	// something other than what was requested.
+	if (configPaths.empty() && !configOverrides.empty())
+	{
+		LOG_WARN("None of the {} requested evaluation configs could be used. Skipping evaluation run.", configOverrides.size());
+
+		return;
 	}
 
 	if (configPaths.empty())
