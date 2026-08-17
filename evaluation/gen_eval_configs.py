@@ -99,6 +99,12 @@ class CoordinateSetup:
     beta: Optional[float] = None
     theta: Optional[float] = None
 
+    #: Three-hit variant: subtract the second hit from the first hit of the same ray
+    #: instead of letting it contribute negative weights on its own cage triangle. Beta
+    #: is then the positive fraction taken out of the first hit, so the coordinates stay
+    #: positive for beta <= alpha.
+    subtract_second_from_first: bool = False
+
     #: Weight PMVC with heat-method interior distances instead of the rasterized depth.
     #: This is what fills the table the interior distance map is read back from.
     use_interior_distance: bool = False
@@ -176,6 +182,15 @@ COORDINATE_SETUPS = [
         alpha=1.0,
         beta=-1.0,
         theta=1.0,
+    ),
+    CoordinateSetup(
+        name="pmvc_3hit_a1_b1_t1_energy",
+        coordinate_type="PMVC",
+        hit_count=3,
+        alpha=1.0,
+        beta=1.0,
+        theta=1.0,
+        subtract_second_from_first=True,
     ),
 ]
 
@@ -459,6 +474,23 @@ def _validate_setup(problems, setup):
                 "(hit_count={}), they are ignored here.".format(THREE_HIT_COUNT),
             )
 
+    if setup.subtract_second_from_first and (
+        canonical != "PMVC" or setup.hit_count != THREE_HIT_COUNT
+    ):
+        problems.warn(
+            where,
+            "subtract_second_from_first only applies to the three-hit PMVC variant "
+            "(hit_count={}), it is ignored here.".format(THREE_HIT_COUNT),
+        )
+
+    if setup.subtract_second_from_first and setup.beta is not None and setup.beta < 0.0:
+        problems.warn(
+            where,
+            "subtract_second_from_first reads beta as the positive fraction taken out of "
+            "the first hit, so a negative beta ({}) adds the second hit instead of "
+            "subtracting it.".format(setup.beta),
+        )
+
     if setup.distance_emphasis is not None and setup.distance_emphasis < 0:
         problems.error(
             where, "distance_emphasis must not be negative, got {}.".format(setup.distance_emphasis)
@@ -603,6 +635,7 @@ def build_project(entry, deformed_cage, setup, coordinate_type, project_name, pa
         if setup.theta is not None:
             project["theta"] = setup.theta
         project["useInteriorDistance"] = bool(setup.use_interior_distance)
+        project["subtractSecondFromFirst"] = bool(setup.subtract_second_from_first)
 
     project["influenceMap"] = bool(entry.influence_map)
     if entry.influence_map:

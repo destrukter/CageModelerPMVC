@@ -35,6 +35,7 @@ struct ProjectModelData
 		_pmvcBeta = other._pmvcBeta;
 		_pmvcTheta = other._pmvcTheta;
 		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
+		_pmvcSubtractSecondFromFirst = other._pmvcSubtractSecondFromFirst;
 	}
 
 	ProjectModelData(ProjectModelData&& other) noexcept
@@ -85,6 +86,7 @@ struct ProjectModelData
 		swap(lhs._pmvcBeta, rhs._pmvcBeta);
 		swap(lhs._pmvcTheta, rhs._pmvcTheta);
 		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
+		swap(lhs._pmvcSubtractSecondFromFirst, rhs._pmvcSubtractSecondFromFirst);
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -130,7 +132,8 @@ struct ProjectModelData
 			lhs._pmvcAlpha == rhs._pmvcAlpha &&
 			lhs._pmvcBeta == rhs._pmvcBeta &&
 			lhs._pmvcTheta == rhs._pmvcTheta &&
-			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance;
+			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance &&
+			lhs._pmvcSubtractSecondFromFirst == rhs._pmvcSubtractSecondFromFirst;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -216,6 +219,13 @@ struct ProjectModelData
 	float _pmvcAlpha = 1.0f;
 	float _pmvcBeta = -1.0f;
 	float _pmvcTheta = 1.0f;
+
+	/// Three-hit PMVC variant: subtract the second hit from the first hit of the same ray
+	/// instead of depositing it as a negative contribution on its own cage triangle. The
+	/// mass the second hit removes then stays on the triangle that was over-counted, so
+	/// beta is read as the positive fraction taken back out of the first hit and the
+	/// coordinates remain positive as long as beta does not exceed alpha.
+	bool _pmvcSubtractSecondFromFirst = false;
 
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;
 

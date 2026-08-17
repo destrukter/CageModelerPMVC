@@ -394,7 +394,8 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	const float alpha,
 	const float beta,
 	const float theta,
-	const bool useInteriorDistance)
+	const bool useInteriorDistance,
+	const bool subtractSecondFromFirst)
 {
 	assert(_device && "Device is null");
 	assert(_descriptorPool && "DescriptorPool is null");
@@ -425,13 +426,24 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	// single hit.
 	const uint32_t effectiveHitCount = useOffset ? 1u : std::max(1u, hitCount);
 
-	LOG_INFO("PMVC compute (Ring): hitCount={}, offset={}, interiorDistance={}, alpha={}, beta={}, theta={}",
+	// The combination only exists where two hits share a dispatch, which is the three-hit
+	// variant and nothing else.
+	const bool combineHits = subtractSecondFromFirst && !useOffset && effectiveHitCount == PMVCSettings::kThreeHitCount;
+	if (subtractSecondFromFirst && !combineHits)
+	{
+		LOG_WARN("'subtractSecondFromFirst' only applies to the three-hit PMVC variant, ignoring it for hitCount={} and offset={}.",
+			effectiveHitCount,
+			useOffset);
+	}
+
+	LOG_INFO("PMVC compute (Ring): hitCount={}, offset={}, interiorDistance={}, alpha={}, beta={}, theta={}, subtractSecondFromFirst={}",
 		effectiveHitCount,
 		useOffset,
 		interiorDetours != nullptr,
 		alpha,
 		beta,
-		theta);
+		theta,
+		combineHits);
 
 	const auto instanceInitStart = std::chrono::steady_clock::now();
 	CubemapRenderInstance instance(
@@ -443,6 +455,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		alpha,
 		beta,
 		theta,
+		combineHits,
 		interiorDetours,
 
 		_device,

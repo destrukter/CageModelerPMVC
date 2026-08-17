@@ -98,6 +98,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 	const float alpha,
 	const float beta,
 	const float theta,
+	const bool subtractSecondFromFirst,
 	const Eigen::MatrixXf* interiorDetours,
 
 	RenderResourceRef<Device> device,
@@ -125,6 +126,7 @@ CubemapRenderInstance::CubemapRenderInstance(
 , _alpha(alpha)
 , _beta(beta)
 , _theta(theta)
+, _subtractSecondFromFirst(subtractSecondFromFirst)
 , _threeHitVariant(hitCount == PMVCSettings::kThreeHitCount && !useOffset)
 , _format(format)
 , _device(std::move(device))
@@ -274,7 +276,10 @@ void CubemapRenderInstance::Initialize()
 		_deformableMesh,
 		_pmvcUseOffset,
 		_targetCount,
-		interiorSettings
+		interiorSettings,
+		// Only the three-hit variant ever hands two hits to one dispatch, so the
+		// combination has nothing to act on anywhere else.
+		_subtractSecondFromFirst && _threeHitVariant
 	);
 
 	CreateCommandPool(_device->GetQueueFamilies()._graphics.value());

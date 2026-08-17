@@ -133,6 +133,7 @@ namespace
 		std::optional<float> _pmvcBeta;
 		std::optional<float> _pmvcTheta;
 		std::optional<bool> _pmvcUseInteriorDistance;
+		std::optional<bool> _pmvcSubtractSecondFromFirst;
 
 		/// The three color map exports are independent of each other and carry their own
 		/// vertex selection, so a single project can export all of them at once.
@@ -407,6 +408,7 @@ namespace
 			project._pmvcBeta = ExtractJsonFloatValue(objectText, "beta");
 			project._pmvcTheta = ExtractJsonFloatValue(objectText, "theta");
 			project._pmvcUseInteriorDistance = ExtractJsonBoolValue(objectText, "useInteriorDistance");
+			project._pmvcSubtractSecondFromFirst = ExtractJsonBoolValue(objectText, "subtractSecondFromFirst");
 
 			project._influenceMap = ExtractJsonBoolValue(objectText, "influenceMap");
 			project._influenceVertices = ExtractJsonIntArrayValue(objectText, "influenceVertices");
@@ -575,6 +577,7 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 	_projectModel->_pmvcBeta = -1.0f;
 	_projectModel->_pmvcTheta = 1.0f;
 	_projectModel->_pmvcUseInteriorDistance = false;
+	_projectModel->_pmvcSubtractSecondFromFirst = false;
 	_projectModel->ApplyPMVCPreset();
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
@@ -715,6 +718,7 @@ void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const 
 		std::optional<int32_t> _cageVertexCount;
 		std::optional<int32_t> _pmvcHitCount;
 		std::optional<bool> _pmvcUseInteriorDistance;
+		std::optional<bool> _pmvcSubtractSecondFromFirst;
 	};
 
 	std::vector<EvaluationResult> results;
@@ -771,6 +775,7 @@ void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const 
 		_projectModel->_pmvcBeta = project._pmvcBeta.value_or(-1.0f);
 		_projectModel->_pmvcTheta = project._pmvcTheta.value_or(1.0f);
 		_projectModel->_pmvcUseInteriorDistance = project._pmvcUseInteriorDistance.value_or(false);
+		_projectModel->_pmvcSubtractSecondFromFirst = project._pmvcSubtractSecondFromFirst.value_or(false);
 		// The offset variant is the PMVCO coordinate type, so the preset derives it (and
 		// the hit count it implies) from the coordinate type of the project.
 		_projectModel->ApplyPMVCPreset();
@@ -828,7 +833,8 @@ void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const 
 				std::nullopt,
 				std::nullopt,
 				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt,
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSubtractSecondFromFirst) : std::nullopt });
 			continue;
 		}
 
@@ -913,7 +919,8 @@ void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const 
 						meshVertexCount,
 			cageVertexCount,
 			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSubtractSecondFromFirst) : std::nullopt });
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
@@ -979,6 +986,10 @@ void Editor::RunEvaluationConfig(const std::filesystem::path& configPath, const 
 		if (result._pmvcUseInteriorDistance.has_value())
 		{
 			timingOutput << ",\n      \"useInteriorDistance\": " << (result._pmvcUseInteriorDistance.value() ? "true" : "false");
+		}
+		if (result._pmvcSubtractSecondFromFirst.has_value())
+		{
+			timingOutput << ",\n      \"subtractSecondFromFirst\": " << (result._pmvcSubtractSecondFromFirst.value() ? "true" : "false");
 		}
 		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
 	}
@@ -1421,7 +1432,8 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 						projectModelSnapshot->_pmvcAlpha,
 						projectModelSnapshot->_pmvcBeta,
 						projectModelSnapshot->_pmvcTheta,
-						projectModelSnapshot->_pmvcUseInteriorDistance));
+						projectModelSnapshot->_pmvcUseInteriorDistance,
+						projectModelSnapshot->_pmvcSubtractSecondFromFirst));
 				}
 				catch (...)
 				{

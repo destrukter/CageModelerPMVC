@@ -73,7 +73,8 @@ struct CubemapMatricesUBO
  *    three-hit variant where the first, second and third hit are weighted by alpha, beta
  *    and theta instead. There the first two hits are rendered into their own color
  *    images and combined by one dispatch, so the second hit is subtracted from the first
- *    one per texel,
+ *    one per texel. With subtractSecondFromFirst that subtraction is redirected onto the
+ *    first hit's own triangle, which keeps every contribution positive,
  *  - interior distances replace the Euclidean hit distance when a detour table is set,
  *  - the offset variant (PMVCO) weights by the solid angle alone.
  */
@@ -89,6 +90,7 @@ public:
 		float alpha,
 		float beta,
 		float theta,
+		bool subtractSecondFromFirst,
 		const Eigen::MatrixXf* interiorDetours,
 
 		RenderResourceRef<Device> device,
@@ -171,6 +173,11 @@ private:
 	float _alpha = 1.0f;
 	float _beta = -1.0f;
 	float _theta = 1.0f;
+
+	/// Subtract the second hit from the first one on its own ray instead of letting it
+	/// contribute negative mass on its own triangle. Beta is then the positive fraction
+	/// of the second hit that is taken back out of the first one.
+	bool _subtractSecondFromFirst = false;
 
 	/// The three-hit variant, which combines its first two hits in a single dispatch.
 	bool _threeHitVariant = false;

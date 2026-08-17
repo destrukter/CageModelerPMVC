@@ -205,7 +205,8 @@ void RingComputeStrategy::DispatchAfterRender(
 	pc.uHitWeightA = first.weight;
 	pc.uHitWeightB = secondHit.weight;
 	pc.uFlags = (_offset ? ComputePushConstants::SolidAngleOnly : 0) |
-		(UseInteriorDistance() ? ComputePushConstants::InteriorDistance : 0);
+		(UseInteriorDistance() ? ComputePushConstants::InteriorDistance : 0) |
+		(_subtractSecondFromFirst ? ComputePushConstants::SubtractSecondFromFirst : 0);
 
 	vkCmdPushConstants(
 		cmd,

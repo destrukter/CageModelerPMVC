@@ -68,6 +68,11 @@ public:
 	 *                 first, second and third hit.
 	 * @param useInteriorDistance Weight by heat-method interior distances instead of the
 	 *                            rasterized Euclidean depth.
+	 * @param subtractSecondFromFirst Three-hit variant only: take beta out of the first
+	 *                                hit of the same ray instead of giving the second hit
+	 *                                a (negative) contribution on its own triangle. Beta
+	 *                                is then read as a positive subtracted fraction, and
+	 *                                the coordinates stay positive for beta <= alpha.
 	 */
 	MeshOperationResult<MeshComputeWeightsOperationResult> ComputeCoordinates(
 		bool useOffset,
@@ -75,7 +80,8 @@ public:
 		float alpha = 1.0f,
 		float beta = -1.0f,
 		float theta = 1.0f,
-		bool useInteriorDistance = false);
+		bool useInteriorDistance = false,
+		bool subtractSecondFromFirst = false);
 
 	void SetCage(const EigenMesh& mesh) { _cageMesh = mesh; }
 	void SetMesh(const EigenMesh& mesh) { _deformableMesh = mesh; }

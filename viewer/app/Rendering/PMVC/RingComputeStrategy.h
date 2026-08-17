@@ -34,7 +34,11 @@ struct ComputePushConstants
 		/// Lengthen the rasterized hit distance by the interpolated interior detour.
 		InteriorDistance = 1 << 0,
 		/// Weight by the solid angle alone, without any distance term (PMVCO).
-		SolidAngleOnly = 1 << 1
+		SolidAngleOnly = 1 << 1,
+		/// Take the second hit out of the first hit of the same ray instead of giving it a
+		/// contribution of its own, which keeps the removed mass on the triangle that was
+		/// over-counted. uHitWeightB is then the positive fraction that is subtracted.
+		SubtractSecondFromFirst = 1 << 2
 	};
 
 	glm::ivec2 uFaceSize { 0, 0 };
@@ -112,7 +116,8 @@ public:
 		EigenMesh& deformableMesh,
 		bool offset,
 		uint32_t targetCount,
-		const InteriorDistanceSettings& interiorDistance)
+		const InteriorDistanceSettings& interiorDistance,
+		bool subtractSecondFromFirst)
 		: _device(device)
 		, _computeQueueFamily(computeQueueFamily)
 		, _faceSize(faceSize)
@@ -125,6 +130,7 @@ public:
 		, _offset(offset)
 		, _targetCount(targetCount == 0 ? 1 : static_cast<int>(targetCount))
 		, _interiorDistance(interiorDistance)
+		, _subtractSecondFromFirst(subtractSecondFromFirst)
 	{
 	}
 
@@ -245,4 +251,10 @@ private:
 	// binding, so a dummy buffer is bound when the variant is disabled.
 	InteriorDistanceSettings _interiorDistance;
 	Buffer _interiorDistanceBuffer;
+
+	// Energy preserving combination of the two hits that share a dispatch: the second hit
+	// is taken out of the first one on its own ray instead of being deposited on its own
+	// triangle. Only the three-hit variant ever dispatches two hits together, so the flag
+	// is inert everywhere else.
+	bool _subtractSecondFromFirst = false;
 };

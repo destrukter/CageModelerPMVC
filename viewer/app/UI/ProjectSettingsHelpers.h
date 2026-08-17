@@ -166,6 +166,20 @@ struct ProjecSettingsHelpers
 					const auto thetaLabel = std::string("##PMVCTheta") + idSuffix;
 					ImGui::InputFloat(thetaLabel.c_str(), &model._pmvcTheta, 0.0f, 0.0f, "%.3f");
 				}
+
+				ImGui::TableNextRow();
+				{
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextEx("Subtract hit 2 from hit 1");
+					ImGui::SameLine();
+					UIHelpers::HelpMarker("Three-hit PMVC variant: take the second hit out of the first hit of the same ray instead of letting it contribute negative weights on its own cage triangle. The removed mass stays on the triangle that was over-counted, so beta becomes the positive fraction subtracted from the first hit and the coordinates stay positive as long as beta does not exceed alpha.");
+
+					ImGui::TableSetColumnIndex(1);
+					UIHelpers::SetRightAligned(100.0f);
+
+					const auto subtractLabel = std::string("##PMVCSubtractSecondFromFirst") + idSuffix;
+					ImGui::Checkbox(subtractLabel.c_str(), &model._pmvcSubtractSecondFromFirst);
+				}
 			}
 			ImGui::EndDisabled();
 		}

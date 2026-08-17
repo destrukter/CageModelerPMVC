@@ -14,6 +14,14 @@
 //     texel, with beta negative so the second hit is subtracted from the first one on
 //     the ray it belongs to. Every other configuration passes uHitWeightB = 0, which
 //     skips set B entirely (its bindings then point at set A).
+//   * kFlagSubtractSecondFromFirst redirects that subtraction onto the first hit instead
+//     of depositing it on the second hit's own triangle. The texel then contributes
+//     alpha * wA - beta * wB once, distributed over the triangle the ray hit first, so
+//     beta is read as the (positive) fraction of the second hit that is taken back out
+//     of the first one rather than as a signed weight of its own. Depth peeling
+//     guarantees wB < wA, so for beta <= alpha the result stays positive and no cage
+//     vertex ever receives negative mass; the difference is clamped at zero so an
+//     over-subtraction cannot flip the ray's sign either.
 //   * kFlagSolidAngleOnly selects the offset (PMVCO) weighting, which is driven by the
 //     solid angle of the texel alone and has no distance term.
 //   * kFlagInteriorDistance lengthens the rasterized (Euclidean) hit distance by the
@@ -76,23 +84,43 @@ layout(push_constant) uniform Params {
 
 const int kFlagInteriorDistance = 1;
 const int kFlagSolidAngleOnly = 2;
+const int kFlagSubtractSecondFromFirst = 4;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 /**
- * Accumulates the contribution of one hit of one texel. weightScale can be negative
- * (beta), which subtracts the hit from whatever the other hit of the same texel adds.
+ * One hit of one texel: the cage triangle the ray landed on, the barycentric coordinates
+ * of the hit point and the unweighted magnitude of its contribution (always positive).
  */
-void accumulateHit(vec4 tex, float depth, float solidAngle, uvec2 texel, float weightScale)
+struct HitSample
 {
+    bool  valid;
+    uvec3 indices;
+    vec3  bary;
+    float weight;
+};
+
+/**
+ * Reads the hit of one texel out of one rendered (bary, depth) set. The hit weight of the
+ * pass is deliberately not applied here so the caller can combine two hits of the same
+ * texel before anything is deposited.
+ */
+HitSample sampleHit(vec4 tex, float depth, float solidAngle, uvec2 texel)
+{
+    HitSample hit;
+    hit.valid = false;
+    hit.indices = uvec3(0u);
+    hit.bary = vec3(0.0);
+    hit.weight = 0.0;
+
     uint tri = uint(tex.a * float(params.uNumTriangles) + 0.5);
     if (tri >= uint(params.uNumTriangles))
-        return;
+        return hit;
 
     // 1.0 means no geometry hit (clear value), which also covers the texels the depth
     // peeling pass discarded.
     if (depth >= 0.999999)
-        return;
+        return hit;
 
     uint i0 = vertexList[tri * 3 + 0];
     uint i1 = vertexList[tri * 3 + 1];
@@ -137,18 +165,31 @@ void accumulateHit(vec4 tex, float depth, float solidAngle, uvec2 texel, float w
     }
 
     if (w <= 0.0)
+        return hit;
+
+    hit.valid = true;
+    hit.indices = uvec3(i0, i1, i2);
+    hit.bary = tex.rgb;
+    hit.weight = w;
+
+    return hit;
+}
+
+/**
+ * Deposits an already weighted contribution on the cage triangle of the hit. weight is the
+ * final signed mass of the texel, so a negative one subtracts. The barycentric coordinates
+ * sum to one, which keeps sum(lambda) == wsum and the normalized coordinates a partition
+ * of unity no matter how the hits were combined.
+ */
+void emitHit(HitSample hit, float weight)
+{
+    if (!hit.valid || weight == 0.0)
         return;
 
-    // Apply the weight of the hit last so a negative weight (beta) flips the sign of the
-    // whole contribution instead of dropping it above.
-    w *= weightScale;
-    if (w == 0.0)
-        return;
-
-    atomicAdd(lambda[i0], tex.r * w);
-    atomicAdd(lambda[i1], tex.g * w);
-    atomicAdd(lambda[i2], tex.b * w);
-    atomicAdd(wsum[0], w);
+    atomicAdd(lambda[hit.indices.x], hit.bary.r * weight);
+    atomicAdd(lambda[hit.indices.y], hit.bary.g * weight);
+    atomicAdd(lambda[hit.indices.z], hit.bary.b * weight);
+    atomicAdd(wsum[0], weight);
 }
 
 void main()
@@ -170,22 +211,43 @@ void main()
 
     // First hit (set A), weighted by alpha (or theta for the third hit, or 1 outside the
     // three-hit variant).
-    accumulateHit(
+    HitSample hitA = sampleHit(
         texelFetch(uBaryTexA, coord, 0),
         texelFetch(uDepthTexA, coord, 0).r,
         solidAngle,
-        texel,
-        params.uHitWeightA);
+        texel);
 
-    // Second hit (set B) of the same ray, weighted by beta. Both hits of the texel are
-    // resident here, so the second one is subtracted per pixel from the first.
-    if (params.uHitWeightB != 0.0)
+    // Second hit (set B) of the same ray. Both hits of the texel are resident here, so
+    // the second one meets the first one per pixel.
+    if (params.uHitWeightB == 0.0)
     {
-        accumulateHit(
-            texelFetch(uBaryTexB, coord, 0),
-            texelFetch(uDepthTexB, coord, 0).r,
-            solidAngle,
-            texel,
-            params.uHitWeightB);
+        emitHit(hitA, params.uHitWeightA * hitA.weight);
+
+        return;
     }
+
+    HitSample hitB = sampleHit(
+        texelFetch(uBaryTexB, coord, 0),
+        texelFetch(uDepthTexB, coord, 0).r,
+        solidAngle,
+        texel);
+
+    if ((params.uFlags & kFlagSubtractSecondFromFirst) != 0)
+    {
+        // Energy preserving combination: the second hit does not get a contribution of
+        // its own, it only takes mass back out of the first hit of the same ray. What is
+        // removed therefore lands on the triangle that was over-counted instead of
+        // becoming negative mass somewhere else in the cage.
+        //
+        // The second hit is peeled against the depth of the first one, so it only exists
+        // where the first one does and its magnitude is always the smaller of the two;
+        // the clamp only ever engages for beta > alpha (or when an interior detour
+        // reorders the two hit distances).
+        emitHit(hitA, max(params.uHitWeightA * hitA.weight - params.uHitWeightB * hitB.weight, 0.0));
+
+        return;
+    }
+
+    emitHit(hitA, params.uHitWeightA * hitA.weight);
+    emitHit(hitB, params.uHitWeightB * hitB.weight);
 }

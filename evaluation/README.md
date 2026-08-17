@@ -106,9 +106,25 @@ Indices are 0-based into the undeformed cage: index *n* is the (*n*+1)-th `v` li
 cage OBJ, because the cage loader keeps the file order.
 
 **Coordinate setups** are a separate list of variants and their parameters
-(`coordinate_type`, `hit_count`, `alpha` / `beta` / `theta`, `use_interior_distance`,
-`samples`, and the distance map isoline settings). The generator emits the full cartesian
-product of model entries and coordinate setups.
+(`coordinate_type`, `hit_count`, `alpha` / `beta` / `theta`,
+`subtract_second_from_first`, `use_interior_distance`, `samples`, and the distance map
+isoline settings). The generator emits the full cartesian product of model entries and
+coordinate setups.
+
+`subtract_second_from_first` picks how the three-hit variant combines its first two hits,
+which meet in a single compute dispatch either way:
+
+| | Second hit's contribution | Beta | Coordinates |
+| --- | --- | --- | --- |
+| off (default) | negative mass on its *own* cage triangle | signed weight, `-1` subtracts | can go negative |
+| on | taken back out of the *first* hit of the same ray | positive fraction, `1` subtracts it fully | positive for `beta <= alpha` |
+
+With it on, the mass the second hit removes stays on the triangle that was over-counted
+instead of landing elsewhere in the cage. Depth peeling guarantees the second hit is the
+weaker of the two, so `beta <= alpha` never drives a ray negative; a larger beta is
+clamped at zero per texel rather than flipping the ray's sign. Both settings keep the
+coordinates a partition of unity, because the barycentric coordinates of whichever
+triangle receives the mass sum to one.
 
 Filenames and project names are `<entry>__<deformed cage stem>__<setup>`, iteration is
 sorted, so regenerating an unchanged configuration reproduces byte-identical output.
@@ -124,6 +140,8 @@ reported at once, naming the offending entry:
 - exactly one vertex where exactly one is required, at least one where a list is required
 - coordinate types are known, and a setup does not ask for something the viewer overrides
   (`PMVCO` forces a single hit and no interior distance)
+- `subtract_second_from_first` is only set on the three-hit variant, and is paired with a
+  positive beta (a negative one would add the second hit instead of subtracting it)
 - coordinate types requiring a tetrahedral embedding have one
 
 ## Paths
