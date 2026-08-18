@@ -117,6 +117,16 @@ private:
 	void ExportDeformedCage(std::filesystem::path filepath) const;
 
 	/**
+	 * The cage vertices that are currently selected in the viewport, in ascending index
+	 * order. All three color map exports are centered on them, so an interactively picked
+	 * cage vertex drives the distance fields the same way it drives the influence map
+	 * instead of them falling back to the first vertex of the parametrization.
+	 *
+	 * @return The selected cage vertex indices, or nothing when nothing is selected.
+	 */
+	[[nodiscard]] std::optional<std::vector<int32_t>> GetSelectedCageVertexIndices() const;
+
+	/**
 	 * Exports the influence color map as an .OBJ file.
 	 * @param filepath A filepath for the output .OBJ file.
 	 */

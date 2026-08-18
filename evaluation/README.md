@@ -105,6 +105,12 @@ entry's deformed cages share:
 Indices are 0-based into the undeformed cage: index *n* is the (*n*+1)-th `v` line of the
 cage OBJ, because the cage loader keeps the file order.
 
+A hand written config may enable a distance map without giving it a vertex of its own
+(`euclideanDistanceVertex` / `interiorDistanceVertex`). It is then measured from the first
+of the `influenceVertices` the influence map is exported for, so all three maps describe
+the same cage vertex. The generator always writes an explicit vertex for every map it
+enables, so generated configs never rely on that fallback.
+
 **Coordinate setups** are a separate list of variants and their parameters
 (`coordinate_type`, `hit_count`, `alpha` / `beta` / `theta`,
 `subtract_second_from_first`, `use_interior_distance`, `samples`, and the distance map

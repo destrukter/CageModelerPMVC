@@ -169,10 +169,22 @@ namespace
 		std::optional<bool> _exportDistanceField;
 		std::optional<bool> _distanceFieldEuclidean;
 
+		/**
+		 * The cage vertex selection all three color maps share: the one given for the
+		 * influence map, otherwise the one of the superseded schema. Every map that carries
+		 * no selection of its own is exported for exactly these indices, so the distance
+		 * maps are measured from the very cage vertex the influence map is exported for
+		 * instead of falling back to the first vertex of the parametrization.
+		 */
+		[[nodiscard]] const std::optional<std::vector<int32_t>>& GetSharedVertices() const
+		{
+			return _influenceVertices.has_value() ? _influenceVertices : _vertices;
+		}
+
 		/// @return The cage vertices the influence map is exported for, if it is enabled.
 		[[nodiscard]] std::optional<std::vector<int32_t>> GetInfluenceVertices() const
 		{
-			const auto& vertices = _influenceVertices.has_value() ? _influenceVertices : _vertices;
+			const auto& vertices = GetSharedVertices();
 
 			// Without an explicit toggle the influence map follows the legacy behavior and
 			// is exported whenever a selection was given at all.
@@ -195,9 +207,11 @@ namespace
 
 			if (toggle.value_or(false))
 			{
+				// A map without a vertex of its own falls back to the selection the
+				// influence map is exported for, not to the parametrization.
 				return vertex.has_value()
 					? std::optional<std::vector<int32_t>>(std::vector<int32_t> { vertex.value() })
-					: _vertices;
+					: GetSharedVertices();
 			}
 
 			// The superseded keys select exactly one of the two maps rather than toggling
@@ -207,7 +221,7 @@ namespace
 				return std::nullopt;
 			}
 
-			return (_distanceFieldEuclidean.value_or(false) == useEuclideanDistance) ? _vertices : std::nullopt;
+			return (_distanceFieldEuclidean.value_or(false) == useEuclideanDistance) ? GetSharedVertices() : std::nullopt;
 		}
 	};
 
@@ -1064,7 +1078,7 @@ void Editor::RecordUI()
 
 						if (filepath.has_value())
 						{
-							ExportInfluenceColorMap(filepath.value());
+							ExportInfluenceColorMap(filepath.value(), GetSelectedCageVertexIndices());
 						}
 					}
 
@@ -1074,7 +1088,7 @@ void Editor::RecordUI()
 
 						if (filepath.has_value())
 						{
-							ExportDistanceFieldColorMap(filepath.value(), false);
+							ExportDistanceFieldColorMap(filepath.value(), false, GetSelectedCageVertexIndices());
 						}
 					}
 
@@ -1084,7 +1098,7 @@ void Editor::RecordUI()
 
 						if (filepath.has_value())
 						{
-							ExportDistanceFieldColorMap(filepath.value(), true);
+							ExportDistanceFieldColorMap(filepath.value(), true, GetSelectedCageVertexIndices());
 						}
 					}
 
@@ -2244,6 +2258,39 @@ void Editor::ExportDeformedCage(std::filesystem::path filepath) const
 		_projectData->_deformedCage._faces,
 		_projectData->_deformedCage._vertices,
 		std::move(filepath));
+}
+
+std::optional<std::vector<int32_t>> Editor::GetSelectedCageVertexIndices() const
+{
+	if (_scene == nullptr || _deformedCageHandle == InvalidHandle)
+	{
+		return std::nullopt;
+	}
+
+	const auto deformedCageMesh = _scene->GetMesh(_deformedCageHandle);
+	if (deformedCageMesh == nullptr)
+	{
+		return std::nullopt;
+	}
+
+	// The deformed cage shares its vertex order with the rest pose cage, so the handles of
+	// the selection are already the cage vertex indices the exports are indexed by.
+	auto selection = deformedCageMesh->GetSelection<SelectionType::Vertex>();
+	const auto selectedHandles = selection.GetSelection();
+	if (selectedHandles.empty())
+	{
+		return std::nullopt;
+	}
+
+	std::vector<int32_t> selectedVertices;
+	selectedVertices.reserve(selectedHandles.size());
+
+	for (const auto vertexHandle : selectedHandles)
+	{
+		selectedVertices.push_back(static_cast<int32_t>(vertexHandle.idx()));
+	}
+
+	return selectedVertices;
 }
 
 void Editor::ExportInfluenceColorMap(std::filesystem::path filepath,

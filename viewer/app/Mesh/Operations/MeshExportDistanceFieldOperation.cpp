@@ -16,7 +16,16 @@ void MeshExportDistanceFieldOperation::Execute()
 	}
 
 	const auto sourceVertexIdx = controlVerticesIdx.front();
-	if (controlVerticesIdx.size() > 1)
+	if (!_params._selectedVertices.has_value())
+	{
+		// Nothing was passed, so the field falls back to the cage vertices the
+		// parametrization translates, which starts at the lowest translated index and has
+		// nothing to do with the vertex the export was meant to be centered on.
+		LOG_WARN("No cage vertex was passed to the distance field export, measuring it from the first of the {} cage vertices the parametrization translates ({}).",
+			controlVerticesIdx.size(),
+			sourceVertexIdx);
+	}
+	else if (controlVerticesIdx.size() > 1)
 	{
 		LOG_WARN("The distance field is measured from a single point, using the first of the {} selected cage vertices ({}).",
 			controlVerticesIdx.size(),
