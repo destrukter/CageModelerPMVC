@@ -4,81 +4,13 @@
 
 MeshComputeInfluenceMapOperation::ExecutionResult MeshComputeInfluenceMapOperation::Execute()
 {
-	std::vector<int> controlVerticesIdx;
-	controlVerticesIdx.reserve(_params._parametrization.translations_per_vertex.size());
+	const auto controlVerticesIdx = ResolveControlVertexIndices(std::nullopt, _params._parametrization);
+	const auto weights = ResolveInfluenceWeights(_params._deformationType,
+		_params._weightsData.get(),
+		_params._somiglianaDeformer,
+		_params._vertices.rows(),
+		_params._modelVerticesOffset,
+		_params._interpolateWeights);
 
-	for (const auto& it : _params._parametrization.translations_per_vertex)
-	{
-		controlVerticesIdx.push_back(it.first);
-	}
-
-	bool usesSomigliana = (_params._deformationType == DeformationType::Somigliana || _params._deformationType == DeformationType::MVC);
-
-	const Eigen::MatrixXd* weights = nullptr;
-	int cageVerticesOffset = 0;
-	bool transposeW = false;
-
-	if (!usesSomigliana)
-	{
-
-		const auto& weights = _params._interpolateWeights ? _params._weightsData.get()._interpolatedWeights : _params._weightsData.get()._weights;
-		
-		cageVerticesOffset = (_params._deformationType == DeformationType::Green ||
-			_params._deformationType == DeformationType::QGC ||
-			_params._deformationType == DeformationType::MLC ||
-			_params._deformationType == DeformationType::MEC ||
-			_params._interpolateWeights) ? 0 : _params._modelVerticesOffset;
-		transposeW = _params._deformationType == DeformationType::Green ||
-			_params._deformationType == DeformationType::QGC ||
-			_params._deformationType == DeformationType::MLC ||
-			_params._deformationType == DeformationType::MEC;
-	}
-	else
-	{
-		weights = &_params._somiglianaDeformer->getPhi();
-		cageVerticesOffset = 0;
-		transposeW = true;
-	}
-
-	Eigen::MatrixXd vertexColors;
-	Eigen::VectorXd influences(_params._vertices.rows());
-	vertexColors.resize(_params._vertices.rows(), 3);
-	for (auto i = 0; i < _params._vertices.rows(); ++i)
-	{
-		const auto embeddingIndex = i + cageVerticesOffset;
-		double res = 0.0;
-
-		if (transposeW)
-		{
-			for (const auto idx : controlVerticesIdx)
-			{
-				res += (*weights)(idx, embeddingIndex);
-			}
-		}
-		else
-		{
-			for (const auto idx : controlVerticesIdx)
-			{
-				res += (*weights)(embeddingIndex, idx);
-			}
-		}
-
-		influences(i) = res;
-	}
-
-	const auto interpolate = [](double val)
-	{
-		val = std::min(std::max(0.0, val), 1.0) * 100;
-		val = std::log(1 + val) / std::log(1 + 100);
-		assert(val >= 0.0 && val <= 1.0);
-
-		return val;
-	};
-
-	for (auto i = 0; i < _params._vertices.rows(); ++i)
-	{
-		vertexColors.row(i) = HSVtoRGB(240.0 * (1.0 - interpolate(influences(i))), 100.0, 100.0);
-	}
-
-	return MeshComputeInfluenceMapOperationResult { std::move(vertexColors) };
+	return MeshComputeInfluenceMapOperationResult { influence_color_map(AccumulateInfluences(weights, controlVerticesIdx)) };
 }

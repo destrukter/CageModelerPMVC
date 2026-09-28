@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Logging/Logging.h>
 #include <Mesh/GeometryUtils.h>
 
 #include <cagedeformations/Parametrization.h>
@@ -206,6 +207,68 @@ struct MeshComputeWeightsOperationResult
 	std::optional<double> _transferMs;
 	std::optional<double> _initMs;
 };
+
+/**
+ * Resolves the weights an influence map is computed from into one layout, cage vertices x
+ * mesh vertices, because every coordinate type stores them differently: the cage based
+ * types store cage x mesh, PMVC stores mesh x cage, and the embedding based types store
+ * embedding x cage with the mesh vertices starting at the model vertices offset (unless
+ * the weights were interpolated onto the mesh).
+ *
+ * Shared by the rendered and the exported influence map so both read the same weights.
+ */
+[[nodiscard]] inline Eigen::MatrixXd ResolveInfluenceWeights(const DeformationType deformationType,
+	const MeshComputeWeightsOperationResult& weightsData,
+	const std::shared_ptr<somig_deformer_3>& somiglianaDeformer,
+	const Eigen::Index meshVertexCount,
+	const int32_t modelVerticesOffset,
+	const bool interpolateWeights)
+{
+	if (deformationType == DeformationType::Somigliana)
+	{
+		return somiglianaDeformer->getPhi();
+	}
+
+	if (DeformationTypeHelpers::IsPMVC(deformationType))
+	{
+		return weightsData._weights.transpose();
+	}
+
+	if (DeformationTypeHelpers::RequiresEmbedding(deformationType))
+	{
+		const auto& weights = interpolateWeights ? weightsData._interpolatedWeights : weightsData._weights;
+		const auto meshOffset = interpolateWeights ? 0 : static_cast<Eigen::Index>(modelVerticesOffset);
+
+		return weights.middleRows(meshOffset, meshVertexCount).transpose();
+	}
+
+	return weightsData._weights;
+}
+
+/**
+ * Sums the influence of the control vertices on every mesh vertex.
+ *
+ * @param weights Weights laid out as returned by ResolveInfluenceWeights().
+ * @return One influence per mesh vertex. Control vertices that are not part of the cage are
+ *         dropped with a warning instead of reading past the weights.
+ */
+[[nodiscard]] inline Eigen::VectorXd AccumulateInfluences(const Eigen::MatrixXd& weights, const std::vector<int>& controlVerticesIdx)
+{
+	Eigen::VectorXd influences = Eigen::VectorXd::Zero(weights.cols());
+
+	for (const auto idx : controlVerticesIdx)
+	{
+		if (idx < 0 || idx >= weights.rows())
+		{
+			LOG_WARN("Ignoring control vertex {} of the influence map, the cage only has {} vertices.", idx, weights.rows());
+			continue;
+		}
+
+		influences += weights.row(idx).transpose();
+	}
+
+	return influences;
+}
 
 struct InterpolatedVertexData
 {

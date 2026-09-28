@@ -55,6 +55,16 @@ void write_influence_color_map_OBJ(const std::string& file_name, const Eigen::Ma
 	const Eigen::MatrixXi& T, const Eigen::MatrixXd& W, const std::vector<int>& control_vertices_idx, int cage_vertices_offset, bool transposeW);
 
 /**
+ * Maps the summed influence of the control vertices on every mesh vertex onto the
+ * logarithmic blue to red ramp of the influence map, one RGB row per vertex.
+ */
+Eigen::MatrixXd influence_color_map(const Eigen::VectorXd& influences);
+
+/// Writes an influence map from precomputed per-vertex influences.
+void write_influence_color_map_OBJ(const std::string& file_name, const Eigen::MatrixXd& V,
+	const Eigen::MatrixXi& T, const Eigen::VectorXd& influences);
+
+/**
  * Writes a per-vertex distance field as an OBJ with vertex colors, in the same format as
  * write_influence_color_map_OBJ. The distance is mapped onto the viridis gradient and
  * overlaid with isolines every DistanceColorMapParams::contourInterval world units.

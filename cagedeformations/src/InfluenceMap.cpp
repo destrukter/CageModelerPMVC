@@ -266,12 +266,35 @@ void write_distance_color_map_OBJ(const std::string& file_name, const Eigen::Mat
 	writeOBJVertexColors(file_name, V, V_colors, T, headerComments);
 }
 
+Eigen::MatrixXd influence_color_map(const Eigen::VectorXd& influences)
+{
+	const auto interpolate = [](double val)
+	{
+		val = std::min(std::max(0., val), 1.) * 100;
+		val = std::log(1 + val) / std::log(1 + 100);
+		assert(val >= 0. && val <= 1.);
+		return val;
+	};
+
+	Eigen::MatrixXd V_colors(influences.size(), 3);
+	for (int i = 0; i < influences.size(); ++i)
+	{
+		V_colors.row(i) = HSVtoRGB(240. * (1. - interpolate(influences(i))), 100., 100.);
+	}
+
+	return V_colors;
+}
+
+void write_influence_color_map_OBJ(const std::string& file_name, const Eigen::MatrixXd& V,
+	const Eigen::MatrixXi& T, const Eigen::VectorXd& influences)
+{
+	writeOBJVertexColors(file_name, V, influence_color_map(influences), T);
+}
+
 void write_influence_color_map_OBJ(const std::string & file_name, const Eigen::MatrixXd & V,
 	const Eigen::MatrixXi & T, const Eigen::MatrixXd & W, const std::vector<int> & control_vertices_idx, int cage_vertices_offset, bool transposeW)
 {
-	Eigen::MatrixXd V_colors;
 	Eigen::VectorXd influences(V.rows());
-	V_colors.resize(V.rows(), 3);
 	for (int i = 0; i < V.rows(); ++i)
 	{
 		auto embedding_idx = i + cage_vertices_offset;
@@ -283,18 +306,5 @@ void write_influence_color_map_OBJ(const std::string & file_name, const Eigen::M
 		influences(i) = res;
 	}
 
-	for (int i = 0; i < V.rows(); ++i)
-	{
-		auto interpolate = [&](double val)
-		{
-			val = std::min(std::max(0., val), 1.) * 100;
-			val = std::log(1 + val) / std::log(1 + 100);
-			assert(val >= 0. && val <= 1.);
-			return val;
-		};
-
-		V_colors.row(i) = HSVtoRGB(240. * (1. - interpolate(influences(i))), 100., 100.);
-	}
-
-	writeOBJVertexColors(file_name, V, V_colors, T);
+	write_influence_color_map_OBJ(file_name, V, T, influences);
 }
