@@ -330,26 +330,21 @@ namespace
 		return objects;
 	}
 
-	[[nodiscard]] std::optional<EvaluationConfig> ParseEvaluationConfig(const std::string& text)
+	/// @return The text between the brackets of the array stored under a key, if there is one.
+	[[nodiscard]] std::optional<std::string> ExtractTopLevelArray(const std::string& text, const std::string& key)
 	{
-		EvaluationConfig config;
-		if (const auto timingsFile = ExtractJsonStringValue(text, "timingsFile"))
-		{
-			config._timingsFile = timingsFile.value();
-		}
-		const auto projectsPos = text.find("\"projects\"");
-		if (projectsPos == std::string::npos)
+		const auto keyPos = text.find("\"" + key + "\"");
+		if (keyPos == std::string::npos)
 		{
 			return std::nullopt;
 		}
-		const auto arrayStart = text.find('[', projectsPos);
+		const auto arrayStart = text.find('[', keyPos);
 		if (arrayStart == std::string::npos)
 		{
 			return std::nullopt;
 		}
 		int32_t bracketDepth = 0;
 		bool isInString = false;
-		std::size_t arrayEnd = std::string::npos;
 		for (std::size_t i = arrayStart; i < text.size(); ++i)
 		{
 			const auto c = text[i];
@@ -372,17 +367,78 @@ namespace
 				--bracketDepth;
 				if (bracketDepth == 0)
 				{
-					arrayEnd = i;
-					break;
+					return text.substr(arrayStart + 1, i - arrayStart - 1);
 				}
 			}
 		}
-		if (arrayEnd == std::string::npos)
+		return std::nullopt;
+	}
+
+	[[nodiscard]] std::optional<std::string> ReadTextFile(const std::filesystem::path& filepath)
+	{
+		std::ifstream file(filepath);
+		if (!file.is_open())
 		{
 			return std::nullopt;
 		}
-		const auto projectsText = text.substr(arrayStart + 1, arrayEnd - arrayStart - 1);
-		for (const auto& objectText : ExtractTopLevelObjects(projectsText))
+
+		return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	}
+
+	/**
+	 * Resolves the evaluation configs to run. A config holds a "projects" array and is run
+	 * as is. The manifest gen_eval_configs.py writes next to its configs holds a "configs"
+	 * array instead, and every config it lists is run in order, resolved relative to the
+	 * manifest, so one launch covers everything the generator produced.
+	 */
+	[[nodiscard]] std::vector<std::filesystem::path> ResolveEvaluationConfigs(const std::filesystem::path& configPath)
+	{
+		const auto text = ReadTextFile(configPath);
+		if (!text.has_value())
+		{
+			LOG_ERROR("Unable to open evaluation config '{}'.", configPath.string());
+			return { };
+		}
+
+		if (text->find("\"projects\"") != std::string::npos)
+		{
+			return { configPath };
+		}
+
+		const auto configsText = ExtractTopLevelArray(text.value(), "configs");
+		if (!configsText.has_value())
+		{
+			LOG_ERROR("Evaluation config '{}' has neither a 'projects' nor a 'configs' array.", configPath.string());
+			return { };
+		}
+
+		std::vector<std::filesystem::path> configPaths;
+		for (const auto& entryText : ExtractTopLevelObjects(configsText.value()))
+		{
+			if (const auto config = ExtractJsonStringValue(entryText, "config"); config.has_value())
+			{
+				configPaths.push_back(configPath.parent_path() / config.value());
+			}
+		}
+
+		LOG_INFO("Evaluation manifest '{}' lists {} configs.", configPath.string(), configPaths.size());
+
+		return configPaths;
+	}
+
+	[[nodiscard]] std::optional<EvaluationConfig> ParseEvaluationConfig(const std::string& text)
+	{
+		EvaluationConfig config;
+		if (const auto timingsFile = ExtractJsonStringValue(text, "timingsFile"))
+		{
+			config._timingsFile = timingsFile.value();
+		}
+		const auto projectsText = ExtractTopLevelArray(text, "projects");
+		if (!projectsText.has_value())
+		{
+			return std::nullopt;
+		}
+		for (const auto& objectText : ExtractTopLevelObjects(projectsText.value()))
 		{
 			EvaluationProjectConfig project;
 			project._name = ExtractJsonStringValue(objectText, "name").value_or("");
@@ -609,35 +665,58 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 void Editor::StartEvaluation()
 {
 	const auto kEvaluationRoot = std::filesystem::path("evaluation");
-	constexpr auto kEvaluationConfig = "projects.json";
-
 	const auto evaluationRoot = std::filesystem::absolute(kEvaluationRoot);
 
-	// A generated config is run without copying it over the default one, either with
-	// "--eval-config <path>" or with the CAGEMODELER_EVAL_CONFIG environment variable, so
-	// that a batch run can iterate over the generated manifest. Paths inside the config
-	// stay relative to the evaluation directory regardless of where the config itself is.
-	auto configPath = evaluationRoot / kEvaluationConfig;
+	// What runs, in order of precedence: the config or manifest given with
+	// "--eval-config <path>" or CAGEMODELER_EVAL_CONFIG, then the manifest of the
+	// generated configs, then the hand written projects.json. Paths inside a config stay
+	// relative to the evaluation directory regardless of where the config itself is.
+	std::filesystem::path configPath;
 	if (const auto configOverride = EvaluationOptions::GetEvaluationConfigPath(); !configOverride.empty())
 	{
 		configPath = std::filesystem::absolute(configOverride);
 	}
+	else if (std::filesystem::exists(evaluationRoot / "generated" / "manifest.json"))
+	{
+		configPath = evaluationRoot / "generated" / "manifest.json";
+	}
+	else
+	{
+		configPath = evaluationRoot / "projects.json";
+	}
 
 	if (!std::filesystem::exists(configPath))
 	{
-		LOG_WARN("Evaluation config '{}' does not exist. Skipping evaluation run.", configPath.string());
+		LOG_WARN("Evaluation config '{}' does not exist (working directory '{}'). Skipping evaluation run.",
+			configPath.string(),
+			std::filesystem::current_path().string());
 		return;
 	}
 
-	std::ifstream configFile(configPath);
-	if (!configFile.is_open())
+	LOG_INFO("Running evaluation config '{}'.", configPath.string());
+
+	for (const auto& resolvedConfigPath : ResolveEvaluationConfigs(configPath))
+	{
+		RunEvaluationConfig(evaluationRoot, resolvedConfigPath);
+	}
+}
+
+void Editor::RunEvaluationConfig(const std::filesystem::path& evaluationRoot, const std::filesystem::path& configPath)
+{
+	if (!std::filesystem::exists(configPath))
+	{
+		LOG_WARN("Evaluation config '{}' does not exist. Skipping it.", configPath.string());
+		return;
+	}
+
+	const auto configContent = ReadTextFile(configPath);
+	if (!configContent.has_value())
 	{
 		LOG_ERROR("Unable to open evaluation config '{}'.", configPath.string());
 		return;
 	}
 
-	const std::string configContent((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
-	const auto parsedConfig = ParseEvaluationConfig(configContent);
+	const auto parsedConfig = ParseEvaluationConfig(configContent.value());
 	if (!parsedConfig.has_value())
 	{
 		LOG_ERROR("Failed to parse evaluation config '{}'.", configPath.string());

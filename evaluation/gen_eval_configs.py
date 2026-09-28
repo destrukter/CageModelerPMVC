@@ -10,11 +10,12 @@ Run it with no arguments to (re)generate everything:
     python3 evaluation/gen_eval_configs.py
 
 The emitted files are consumed by the viewer, which resolves every path inside a
-config relative to the ``evaluation`` directory. Point it at a single generated
-config with either of:
+config relative to the ``evaluation`` directory. Without an override it runs every
+config listed in ``evaluation/generated/manifest.json``. Point it at a single config
+(or another manifest) with either of:
 
-    cageDeformationViewer --eval-config evaluation/generated/<name>.json
-    CAGEMODELER_EVAL_CONFIG=evaluation/generated/<name>.json cageDeformationViewer
+    CageModeler --eval-config evaluation/generated/<name>.json
+    CAGEMODELER_EVAL_CONFIG=evaluation/generated/<name>.json CageModeler
 
 Only the standard library and numpy are imported, so the script runs standalone
 without a build of the host application.

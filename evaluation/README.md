@@ -17,15 +17,19 @@ build of the viewer.
    It writes one config per (model entry x coordinate setup) pair into
    `evaluation/generated/`, plus a `manifest.json` listing all of them.
 
-3. Run one config, or loop over the manifest:
+3. Launch the viewer. With nothing else configured it runs every config listed in
+   `evaluation/generated/manifest.json`, one after another, each writing its own timings
+   file. To run something else, pass a single config or another manifest:
 
    ```sh
    ./CageModeler --eval-config evaluation/generated/<name>.json
    # or
-   CAGEMODELER_EVAL_CONFIG=evaluation/generated/<name>.json ./CageModeler
+   CAGEMODELER_EVAL_CONFIG=evaluation/generated/manifest.json ./CageModeler
    ```
 
-   Without an override the viewer falls back to `evaluation/projects.json`.
+   Without an override and without a generated manifest the viewer falls back to
+   `evaluation/projects.json`. The log names the config it picked, or the path it looked
+   at when it found none.
 
 Use `--dry-run` to validate the configuration without writing anything.
 

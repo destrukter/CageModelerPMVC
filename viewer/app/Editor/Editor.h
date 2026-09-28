@@ -12,6 +12,7 @@
 
 #include <cagedeformations/InfluenceMap.h>
 
+#include <filesystem>
 #include <future>
 #include <optional>
 #include <vector>
@@ -54,6 +55,9 @@ private:
 	void SetUpUIElements();
 
 	void StartEvaluation();
+
+	/// Runs every project of a single evaluation config and writes its timings file.
+	void RunEvaluationConfig(const std::filesystem::path& evaluationRoot, const std::filesystem::path& configPath);
 
 	void CreateSceneLights() const;
 
