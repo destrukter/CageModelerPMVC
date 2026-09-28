@@ -53,8 +53,6 @@ public:
 private:
 	void SetUpUIElements();
 
-	void StartEvaluation();
-
 	void CreateSceneLights() const;
 
 	/**
@@ -65,7 +63,7 @@ private:
 	/**
 	 * Invoked when a new project has been created from the window.
 	 */
-	void OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& completionPromise = nullptr);
+	void OnNewProjectCreated();
 
 	/**
 	 * Invoked when the project settings have been changed and new ones have been applied.
@@ -114,25 +112,6 @@ private:
 	 */
 	void ExportInfluenceColorMap(std::filesystem::path filepath,
 		std::optional<std::vector<int32_t>> selectedVertices = std::nullopt) const;
-
-	/**
-	 * Exports the distance field from the selected cage vertex to every mesh vertex as an
-	 * .OBJ file, following the influence color map: same vertex colored format, same way of
-	 * selecting the point the field is measured from.
-	 *
-	 * The interior distances are read back from the table the interior-distance PMVC
-	 * variant has already computed, they are never recomputed here. The Euclidean variant
-	 * is the debugging counterpart and runs on any project.
-	 *
-	 * @param filepath A filepath for the output .OBJ file.
-	 * @param useEuclideanDistance Export the Euclidean distance field instead of the interior one.
-	 * @param selectedVertices The cage vertex to measure from, defaults to the parametrization.
-	 * @param colorMapParams Normalization and isoline settings of the color map.
-	 */
-	void ExportDistanceFieldColorMap(std::filesystem::path filepath,
-		const bool useEuclideanDistance,
-		std::optional<std::vector<int32_t>> selectedVertices = std::nullopt,
-		DistanceColorMapParams colorMapParams = { }) const;
 
 	/**
 	 * Exports the weights as a .DMAT file.
@@ -241,22 +220,6 @@ private:
 	void OnSequencerEndedDragging();
 
 private:
-	struct EvaluationStageTimings
-	{
-		std::optional<double> _initMs;
-		std::optional<double> _renderMs;
-		std::optional<double> _computeMs;
-		std::optional<double> _computeTotalMs;
-		std::optional<double> _transferMs;
-		std::optional<double> _deformationApplyMs;
-	};
-
-	void ClearEvaluationData();
-	bool _isEvaluationMode = false;
-	std::atomic<bool> _projectCreationFailed = false;
-	mutable std::mutex _evaluationTimingsMutex;
-	EvaluationStageTimings _latestEvaluationStageTimings;
-
 	/// A pointer to the input system to get input information.
 	SubsystemPtr<InputSubsystem> _inputSubsystem = nullptr;
 
