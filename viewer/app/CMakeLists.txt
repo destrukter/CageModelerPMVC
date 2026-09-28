@@ -27,6 +27,7 @@ add_executable(${PROJECT_NAME}
     Core/Subsystem.cpp
     Logging/LoggingSubsystem.cpp
     Editor/Editor.cpp
+    Editor/EvaluationOptions.cpp
     Editor/Scene.cpp
     Editor/Gizmo.cpp
     UI/WindowSubsystem.cpp
@@ -52,6 +53,7 @@ add_executable(${PROJECT_NAME}
     Mesh/Operations/MeshComputeInfluenceMapOperation.cpp
     Mesh/Operations/MeshComputeDeformationOperation.cpp
     Mesh/Operations/MeshExportInfluenceMapOperation.cpp
+    Mesh/Operations/MeshExportDistanceFieldOperation.cpp
     Mesh/Operations/MeshLoadOperation.cpp
     Mesh/Operations/MeshExportOperation.cpp
     Rendering/Commands/BufferCommand.h
@@ -72,12 +74,10 @@ add_executable(${PROJECT_NAME}
     main.cpp
     Rendering/PMVC/CubemapRenderInstance.cpp
     Rendering/PMVC/CubemapManager.cpp
-    Rendering/PMVC/CpuComputeStrategy.cpp
-    Rendering/PMVC/GpuSerialComputeStrategy.h
-    Rendering/PMVC/GpuAtomicComputeStrategy.cpp
+    Rendering/PMVC/RingComputeStrategy.cpp
     Rendering/PMVC/SphereWeightCalculator.h
     Rendering/PMVC/ScopedCmdBuffer.cpp
-    ${IMGUI_BINDINGS} "Rendering/PMVC/DebugCubemapComputeStrategy.h" "Rendering/PMVC/DebugCubemapComputeStrategy.cpp" "Rendering/PMVC/GpuSerialComputeStrategy.cpp" "Rendering/PMVC/GpuMassivelyParallelComputeStrategy.h" "Rendering/PMVC/GpuMassivelyParallelComputeStrategy.cpp" "Rendering/PMVC/SphereWeightCalculator.h")
+    ${IMGUI_BINDINGS})
 
 
 target_compile_definitions(

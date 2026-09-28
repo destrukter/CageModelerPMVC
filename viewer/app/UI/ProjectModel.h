@@ -3,6 +3,8 @@
 #include <Mesh/Operations/MeshWeightsParams.h>
 #include <cagedeformations/somig.h>
 
+#include <algorithm>
+
 struct ProjectModelData
 {
 	ProjectModelData() = default;
@@ -12,7 +14,6 @@ struct ProjectModelData
 	{
 		_deformationType = other._deformationType;
 		_LBCWeightingScheme = other._LBCWeightingScheme;
-		_pmvcComputeType = other._pmvcComputeType;
 		_numBBWSteps = other._numBBWSteps;
 		_numSamples = other._numSamples;
 		_meshFilepath = other._meshFilepath;
@@ -29,10 +30,9 @@ struct ProjectModelData
 		_noOffset = other._noOffset;
 		_pmvcUseOffset = other._pmvcUseOffset;
 		_renderInfluenceMap = other._renderInfluenceMap;
-		_cubemapSize = other._cubemapSize;
-		_pmvcTargetCount = other._pmvcTargetCount;
 		_pmvcHitCount = other._pmvcHitCount;
-		_pmvcOmitNegative = other._pmvcOmitNegative;
+		_pmvcSkipEvenHits = other._pmvcSkipEvenHits;
+		_pmvcUseInteriorDistance = other._pmvcUseInteriorDistance;
 	}
 
 	ProjectModelData(ProjectModelData&& other) noexcept
@@ -62,7 +62,6 @@ struct ProjectModelData
 
 		swap(lhs._deformationType, rhs._deformationType);
 		swap(lhs._LBCWeightingScheme, rhs._LBCWeightingScheme);
-		swap(lhs._pmvcComputeType, rhs._pmvcComputeType);
 		swap(lhs._numBBWSteps, rhs._numBBWSteps);
 		swap(lhs._numSamples, rhs._numSamples);
 		swap(lhs._meshFilepath, rhs._meshFilepath);
@@ -79,10 +78,9 @@ struct ProjectModelData
 		swap(lhs._noOffset, rhs._noOffset);
 		swap(lhs._pmvcUseOffset, rhs._pmvcUseOffset);
 		swap(lhs._renderInfluenceMap, rhs._renderInfluenceMap);
-		swap(lhs._cubemapSize, rhs._cubemapSize);
-		swap(lhs._pmvcTargetCount, rhs._pmvcTargetCount);
 		swap(lhs._pmvcHitCount, rhs._pmvcHitCount);
-		swap(lhs._pmvcOmitNegative, rhs._pmvcOmitNegative);
+		swap(lhs._pmvcSkipEvenHits, rhs._pmvcSkipEvenHits);
+		swap(lhs._pmvcUseInteriorDistance, rhs._pmvcUseInteriorDistance);
 	}
 
 	[[nodiscard]] bool IsFBX() const
@@ -109,7 +107,6 @@ struct ProjectModelData
 	{
 		return lhs._deformationType == rhs._deformationType &&
 			lhs._LBCWeightingScheme == rhs._LBCWeightingScheme &&
-			lhs._pmvcComputeType == rhs._pmvcComputeType &&
 			lhs._numBBWSteps == rhs._numBBWSteps &&
 			lhs._numSamples == rhs._numSamples &&
 			lhs._meshFilepath == rhs._meshFilepath &&
@@ -125,10 +122,9 @@ struct ProjectModelData
 			lhs._findOffset == rhs._findOffset &&
 			lhs._noOffset == rhs._noOffset &&
 			lhs._pmvcUseOffset == rhs._pmvcUseOffset &&
-			lhs._cubemapSize == rhs._cubemapSize &&
-			lhs._pmvcTargetCount == rhs._pmvcTargetCount &&
 			lhs._pmvcHitCount == rhs._pmvcHitCount &&
-			lhs._pmvcOmitNegative == rhs._pmvcOmitNegative;
+			lhs._pmvcSkipEvenHits == rhs._pmvcSkipEvenHits &&
+			lhs._pmvcUseInteriorDistance == rhs._pmvcUseInteriorDistance;
 	}
 
 	[[nodiscard]] bool friend operator!=(const ProjectModelData& lhs, const ProjectModelData& rhs)
@@ -146,22 +142,25 @@ struct ProjectModelData
 		return _deformationType != DeformationType::Somigliana && _renderInfluenceMap;
 	}
 
+	/**
+	 * Keeps the PMVC settings consistent with the selected coordinate type. The offset
+	 * variant is not a setting of its own anymore, it is the PMVCO coordinate type, and
+	 * because it weights by solid angle alone it has no per-ray split: it runs with a single
+	 * hit and none of the settings that shape that split apply to it.
+	 */
 	void ApplyPMVCPreset()
 	{
 		if (_deformationType == DeformationType::PMVC)
 		{
-			_pmvcComputeType = PMVCComputeType::Ring;
 			_pmvcUseOffset = false;
-			_pmvcTargetCount = 64;
-			_pmvcOmitNegative = true;
+			_pmvcHitCount = std::clamp<uint64_t>(_pmvcHitCount, 1, PMVCSettings::kMaxHitCount);
 		}
 		else if (_deformationType == DeformationType::PMVCO)
 		{
-			_pmvcComputeType = PMVCComputeType::Ring;
 			_pmvcUseOffset = true;
-			_pmvcTargetCount = 64;
 			_pmvcHitCount = 1;
-			_pmvcOmitNegative = true;
+			_pmvcSkipEvenHits = false;
+			_pmvcUseInteriorDistance = false;
 		}
 	}
 
@@ -181,7 +180,6 @@ struct ProjectModelData
 	}
 
 	DeformationType _deformationType = DeformationType::Green;
-	PMVCComputeType _pmvcComputeType = PMVCComputeType::Ring;
 	LBC::DataSetup::WeightingScheme _LBCWeightingScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 
 	int32_t _numBBWSteps = 300;
@@ -194,10 +192,17 @@ struct ProjectModelData
 	std::optional<std::filesystem::path> _deformedCageFilepath;
 	std::optional<std::filesystem::path> _parametersFilepath;
 
-	uint64_t _cubemapSize = 32;
-	uint64_t _pmvcTargetCount = 64;
+	/// Number of depth peeling layers rendered per mesh vertex. All of them are weighted
+	/// against each other along their ray and normalized, so every ray contributes the
+	/// same leverage regardless of how often it crosses the cage.
 	uint64_t _pmvcHitCount = 1;
-	bool _pmvcOmitNegative = true;
+
+	/// Drop the entry (every second) hits from the per-ray weight split.
+	bool _pmvcSkipEvenHits = false;
+
+	/// Bias the per-ray weight split towards hits that are reachable without a detour
+	/// through the cage interior. Ignored by the offset (PMVCO) variant.
+	bool _pmvcUseInteriorDistance = false;
 
 	std::shared_ptr<somig_deformer_3> _somiglianaDeformer = nullptr;
 
@@ -209,6 +214,8 @@ struct ProjectModelData
 	bool _interpolateWeights = false;
 	bool _findOffset = false;
 	bool _noOffset = false;
+
+	/// Derived from the coordinate type (PMVCO), not an independent setting.
 	bool _pmvcUseOffset = false;
 
 	/// Render the influence of the mesh as vertex colors.

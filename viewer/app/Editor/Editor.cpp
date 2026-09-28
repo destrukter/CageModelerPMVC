@@ -1,9 +1,11 @@
 #include <Editor/Editor.h>
+#include <Editor/EvaluationOptions.h>
 #include <Editor/Scene.h>
 #include <Input/InputSubsystem.h>
 #include <Mesh/Operations/MeshOperationSystem.h>
 #include <Mesh/Operations/MeshComputeDeformationOperation.h>
 #include <Mesh/Operations/MeshExportInfluenceMapOperation.h>
+#include <Mesh/Operations/MeshExportDistanceFieldOperation.h>
 #include <Mesh/Operations/MeshComputeInfluenceMapOperation.h>
 #include <Mesh/Operations/MeshExportWeightsOperation.h>
 #include <Mesh/Operations/MeshComputeWeightsOperation.h>
@@ -96,7 +98,6 @@ namespace
 	}
 
 	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value);
-	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value);
 	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key);
 
 	[[nodiscard]] std::string EscapeJsonString(const std::string& value)
@@ -122,18 +123,89 @@ namespace
 	{
 		std::string _name;
 		std::string _coordinateType = "MVC";
-		std::string _pmvcComputeType = "Ring";
-		std::optional<bool> _pmvcUseOffset;
 		std::string _mesh;
 		std::string _cage;
 		std::string _deformedCage;
 		std::optional<std::string> _embedding;
 		std::optional<int32_t> _samples;
-		std::optional<int32_t> _cubemapSize;
-		std::optional<int32_t> _pmvcTargetCount;
 		std::optional<int32_t> _pmvcHitCount;
-		std::optional<bool> _pmvcOmitNegative;
+		std::optional<bool> _pmvcSkipEvenHits;
+		std::optional<bool> _pmvcUseInteriorDistance;
+
+		/// The three color map exports are independent of each other and carry their own
+		/// vertex selection, so a single project can export all of them at once.
+		///
+		/// The influence map ("influenceMap") is exported for any number of marked cage
+		/// vertices ("influenceVertices"), while both distance maps are measured from
+		/// exactly one cage vertex each ("euclideanDistanceVertex" /
+		/// "interiorDistanceVertex").
+		///
+		/// The interior distances are read back from the table the interior distance PMVC
+		/// variant fills, so "interiorDistanceMap" only produces an export for a project
+		/// that runs with "useInteriorDistance".
+		std::optional<bool> _influenceMap;
+		std::optional<std::vector<int32_t>> _influenceVertices;
+		std::optional<bool> _euclideanDistanceMap;
+		std::optional<int32_t> _euclideanDistanceVertex;
+		std::optional<bool> _interiorDistanceMap;
+		std::optional<int32_t> _interiorDistanceVertex;
+
+		/// "distanceFieldInterval" is the isoline spacing in world units (unset spaces them
+		/// automatically, zero draws none), "distanceFieldEmphasis" emphasizes every n-th
+		/// isoline and "distanceFieldMax" fixes the normalization maximum so that the
+		/// colors of separate exports stay comparable. They apply to both distance maps.
+		std::optional<float> _distanceFieldInterval;
+		std::optional<int32_t> _distanceFieldEmphasis;
+		std::optional<float> _distanceFieldMax;
+
+		/// Superseded keys, kept so that hand written configs predating the three
+		/// independent toggles keep working: a shared "vertices" selection driving the
+		/// influence map, plus a "distanceField" toggle whose "distanceFieldEuclidean"
+		/// switch picked one of the two distance maps.
 		std::optional<std::vector<int32_t>> _vertices;
+		std::optional<bool> _exportDistanceField;
+		std::optional<bool> _distanceFieldEuclidean;
+
+		/// @return The cage vertices the influence map is exported for, if it is enabled.
+		[[nodiscard]] std::optional<std::vector<int32_t>> GetInfluenceVertices() const
+		{
+			const auto& vertices = _influenceVertices.has_value() ? _influenceVertices : _vertices;
+
+			// Without an explicit toggle the influence map follows the legacy behavior and
+			// is exported whenever a selection was given at all.
+			if (!_influenceMap.value_or(vertices.has_value()))
+			{
+				return std::nullopt;
+			}
+
+			return vertices;
+		}
+
+		/**
+		 * @return The single cage vertex a distance map is measured from, if it is enabled.
+		 * @param useEuclideanDistance Resolve the Euclidean map instead of the interior one.
+		 */
+		[[nodiscard]] std::optional<std::vector<int32_t>> GetDistanceFieldVertices(const bool useEuclideanDistance) const
+		{
+			const auto& toggle = useEuclideanDistance ? _euclideanDistanceMap : _interiorDistanceMap;
+			const auto& vertex = useEuclideanDistance ? _euclideanDistanceVertex : _interiorDistanceVertex;
+
+			if (toggle.value_or(false))
+			{
+				return vertex.has_value()
+					? std::optional<std::vector<int32_t>>(std::vector<int32_t> { vertex.value() })
+					: _vertices;
+			}
+
+			// The superseded keys select exactly one of the two maps rather than toggling
+			// them independently, so they only apply when the new toggle is absent.
+			if (toggle.has_value() || !_exportDistanceField.value_or(false))
+			{
+				return std::nullopt;
+			}
+
+			return (_distanceFieldEuclidean.value_or(false) == useEuclideanDistance) ? _vertices : std::nullopt;
+		}
 	};
 
 	struct EvaluationConfig
@@ -175,6 +247,17 @@ namespace
 		return std::nullopt;
 	}
 
+	[[nodiscard]] std::optional<float> ExtractJsonFloatValue(const std::string& objectText, const std::string& key)
+	{
+		const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?[0-9]+(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)");
+		std::smatch match;
+		if (std::regex_search(objectText, match, pattern) && match.size() > 1)
+		{
+			return std::stof(match[1].str());
+		}
+		return std::nullopt;
+	}
+
 	[[nodiscard]] std::optional<std::vector<int32_t>> ExtractJsonIntArrayValue(const std::string& objectText, const std::string& key)
 	{
 		const std::regex pattern("\"" + key + "\"\\s*:\\s*\\[([^\\]]*)\\]");
@@ -195,6 +278,24 @@ namespace
 		}
 
 		return values;
+	}
+
+	/// Writes the vertex indices a color map was exported for next to the export itself, so
+	/// it can be traced back to its selection.
+	void WriteSelectedVerticesFile(const std::filesystem::path& filepath, const std::vector<int32_t>& selectedVertices)
+	{
+		std::ofstream verticesOutput(filepath, std::ios::out | std::ios::trunc);
+		if (!verticesOutput.is_open())
+		{
+			LOG_WARN("Unable to write the selected vertices file '{}'.", filepath.string());
+
+			return;
+		}
+
+		for (const auto vertexIdx : selectedVertices)
+		{
+			verticesOutput << vertexIdx << "\n";
+		}
 	}
 
 	[[nodiscard]] std::vector<std::string> ExtractTopLevelObjects(const std::string& arrayText)
@@ -294,17 +395,24 @@ namespace
 			EvaluationProjectConfig project;
 			project._name = ExtractJsonStringValue(objectText, "name").value_or("");
 			project._coordinateType = ExtractJsonStringValue(objectText, "coordinateType").value_or("MVC");
-			project._pmvcComputeType = ExtractJsonStringValue(objectText, "pmvcComputeType").value_or("Ring");
-			project._pmvcUseOffset = ExtractJsonBoolValue(objectText, "pmvcUseOffset").value_or(false);
 			project._mesh = ExtractJsonStringValue(objectText, "mesh").value_or("");
 			project._cage = ExtractJsonStringValue(objectText, "cage").value_or("");
 			project._deformedCage = ExtractJsonStringValue(objectText, "deformedCage").value_or("");
 			project._embedding = ExtractJsonStringValue(objectText, "embedding");
 			project._samples = ExtractJsonIntValue(objectText, "samples");
-			project._cubemapSize = ExtractJsonIntValue(objectText, "cubemapSize");
-			project._pmvcTargetCount = ExtractJsonIntValue(objectText, "targetCount");
 			project._pmvcHitCount = ExtractJsonIntValue(objectText, "hitCount");
-			project._pmvcOmitNegative = ExtractJsonBoolValue(objectText, "omitNegative");
+			project._pmvcSkipEvenHits = ExtractJsonBoolValue(objectText, "skipEvenHits");
+			project._pmvcUseInteriorDistance = ExtractJsonBoolValue(objectText, "useInteriorDistance");
+
+			project._influenceMap = ExtractJsonBoolValue(objectText, "influenceMap");
+			project._influenceVertices = ExtractJsonIntArrayValue(objectText, "influenceVertices");
+			project._euclideanDistanceMap = ExtractJsonBoolValue(objectText, "euclideanDistanceMap");
+			project._euclideanDistanceVertex = ExtractJsonIntValue(objectText, "euclideanDistanceVertex");
+			project._interiorDistanceMap = ExtractJsonBoolValue(objectText, "interiorDistanceMap");
+			project._interiorDistanceVertex = ExtractJsonIntValue(objectText, "interiorDistanceVertex");
+
+			// The shared selection of the superseded schema, which the three maps fall back
+			// to when they carry no selection of their own.
 			project._vertices = ExtractJsonIntArrayValue(objectText, "vertices");
 			if (!project._vertices.has_value())
 			{
@@ -312,8 +420,13 @@ namespace
 			}
 			if (!project._vertices.has_value())
 			{
-				project._vertices = ExtractJsonIntArrayValue(objectText, "influenceVertices");
+				project._vertices = project._influenceVertices;
 			}
+			project._exportDistanceField = ExtractJsonBoolValue(objectText, "distanceField");
+			project._distanceFieldEuclidean = ExtractJsonBoolValue(objectText, "distanceFieldEuclidean");
+			project._distanceFieldInterval = ExtractJsonFloatValue(objectText, "distanceFieldInterval");
+			project._distanceFieldEmphasis = ExtractJsonIntValue(objectText, "distanceFieldEmphasis");
+			project._distanceFieldMax = ExtractJsonFloatValue(objectText, "distanceFieldMax");
 			config._projects.push_back(std::move(project));
 		}
 		return config;
@@ -332,28 +445,40 @@ namespace
 			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", projectIndex, project._coordinateType);
 			return false;
 		}
-		else if (DeformationTypeHelpers::IsPMVC(*deformationType) && !ParsePMVCComputeType(project._pmvcComputeType).has_value())
-		{
-			LOG_WARN("Skipping project {} due to unsupported pmvcComputeType '{}'.", projectIndex, project._pmvcComputeType);
-			return false;
-		}
-
-		if (project._cubemapSize.has_value() && project._cubemapSize.value() <= 0)
-		{
-			LOG_WARN("Skipping project {} due to invalid cubemapSize {} (must be > 0).", projectIndex, project._cubemapSize.value());
-			return false;
-		}
-
-		if (project._pmvcTargetCount.has_value() && project._pmvcTargetCount.value() <= 0)
-		{
-			LOG_WARN("Skipping project {} due to invalid targetCount {} (must be > 0).", projectIndex, project._pmvcTargetCount.value());
-			return false;
-		}
 
 		if (project._pmvcHitCount.has_value() && project._pmvcHitCount.value() <= 0)
 		{
 			LOG_WARN("Skipping project {} due to invalid hitCount {} (must be > 0).", projectIndex, project._pmvcHitCount.value());
 			return false;
+		}
+
+		if (project._influenceMap.value_or(false) && !project.GetInfluenceVertices().has_value())
+		{
+			LOG_WARN("Skipping project {} because 'influenceMap' is enabled but no 'influenceVertices' were given.", projectIndex);
+			return false;
+		}
+
+		// Both distance maps are measured from exactly one cage vertex, so an enabled map
+		// without a vertex of its own (and without a selection to fall back to) cannot be
+		// exported at all.
+		if (project._euclideanDistanceMap.value_or(false) && !project.GetDistanceFieldVertices(true).has_value())
+		{
+			LOG_WARN("Skipping project {} because 'euclideanDistanceMap' is enabled but no 'euclideanDistanceVertex' was given.", projectIndex);
+			return false;
+		}
+
+		if (project._interiorDistanceMap.value_or(false) && !project.GetDistanceFieldVertices(false).has_value())
+		{
+			LOG_WARN("Skipping project {} because 'interiorDistanceMap' is enabled but no 'interiorDistanceVertex' was given.", projectIndex);
+			return false;
+		}
+
+		// The interior distances are read back from the table the interior distance PMVC
+		// variant fills, so this combination would export nothing at all.
+		if (project._interiorDistanceMap.value_or(false) && !project._pmvcUseInteriorDistance.value_or(false))
+		{
+			LOG_WARN("Project {} enables 'interiorDistanceMap' but does not run with 'useInteriorDistance'. "
+				"No interior distances will have been computed, so the export will be skipped.", projectIndex);
 		}
 
 		return true;
@@ -382,21 +507,6 @@ namespace
 			return std::nullopt;
 		}
 
-		return it->second;
-	}
-	[[nodiscard]] std::optional<PMVCComputeType> ParsePMVCComputeType(const std::string& value)
-	{
-		static const std::unordered_map<std::string, PMVCComputeType> mapping = {
-			{ "serial", PMVCComputeType::Serial },
-			{ "ring", PMVCComputeType::Ring },
-			{ "all", PMVCComputeType::All },
-			{ "cpu", PMVCComputeType::Cpu }
-		};
-		const auto it = mapping.find(ToLower(value));
-		if (it == mapping.end())
-		{
-			return std::nullopt;
-		}
 		return it->second;
 	}
 }
@@ -454,12 +564,12 @@ void Editor::Initialize(const std::shared_ptr<SceneRenderer>& sceneRenderer, con
 		[this] { OnNewProjectCreated(); });
 
 	_projectModel->_deformationType = DeformationType::PMVC;
-	_projectModel->_pmvcComputeType = PMVCComputeType::Ring;
-	_projectModel->_pmvcUseOffset = false;
-	_projectModel->_pmvcTargetCount = 64;
-	_projectModel->_pmvcHitCount = 1;
-	_projectModel->_pmvcOmitNegative = true;
-	_projectModel->_cubemapSize = 32;
+	// Peel three layers in the default startup project so the per-ray weight split is
+	// exercised on launch instead of degenerating to the single-hit case.
+	_projectModel->_pmvcHitCount = 3;
+	_projectModel->_pmvcSkipEvenHits = false;
+	_projectModel->_pmvcUseInteriorDistance = false;
+	_projectModel->ApplyPMVCPreset();
 	//_projectModel->_meshFilepath = "assets/meshes/tri.obj";
 	//_projectModel->_cageFilepath = "assets/meshes/sphere_cages_triangulated.obj";
 	_projectModel->_meshFilepath = "assets/meshes/armadilloman.obj";
@@ -480,7 +590,17 @@ void Editor::StartEvaluation()
 	constexpr auto kEvaluationConfig = "projects.json";
 
 	const auto evaluationRoot = std::filesystem::absolute(kEvaluationRoot);
-	const auto configPath = evaluationRoot / kEvaluationConfig;
+
+	// A generated config is run without copying it over the default one, either with
+	// "--eval-config <path>" or with the CAGEMODELER_EVAL_CONFIG environment variable, so
+	// that a batch run can iterate over the generated manifest. Paths inside the config
+	// stay relative to the evaluation directory regardless of where the config itself is.
+	auto configPath = evaluationRoot / kEvaluationConfig;
+	if (const auto configOverride = EvaluationOptions::GetEvaluationConfigPath(); !configOverride.empty())
+	{
+		configPath = std::filesystem::absolute(configOverride);
+	}
+
 	if (!std::filesystem::exists(configPath))
 	{
 		LOG_WARN("Evaluation config '{}' does not exist. Skipping evaluation run.", configPath.string());
@@ -504,6 +624,13 @@ void Editor::StartEvaluation()
 
 	const auto timingOutputPath = evaluationRoot / parsedConfig->_timingsFile;
 
+	// A generated config points its timings at a per-config file inside a results
+	// directory, which only exists once something has created it.
+	if (timingOutputPath.has_parent_path())
+	{
+		std::filesystem::create_directories(timingOutputPath.parent_path());
+	}
+
 #ifdef NDEBUG
 	constexpr auto buildType = "Release";
 #else
@@ -524,12 +651,9 @@ void Editor::StartEvaluation()
 		std::optional<double> _deformationApplyMs;
 		std::optional<int32_t> _meshVertexCount;
 		std::optional<int32_t> _cageVertexCount;
-		std::optional<std::string> _pmvcComputeType;
-		std::optional<bool> _pmvcUseOffset;
-		std::optional<int32_t> _cubemapSize;
-		std::optional<int32_t> _pmvcTargetCount;
 		std::optional<int32_t> _pmvcHitCount;
-		std::optional<bool> _pmvcOmitNegative;
+		std::optional<bool> _pmvcSkipEvenHits;
+		std::optional<bool> _pmvcUseInteriorDistance;
 	};
 
 	std::vector<EvaluationResult> results;
@@ -541,14 +665,10 @@ void Editor::StartEvaluation()
 	for (std::size_t i = 0; i < parsedConfig->_projects.size(); ++i)
 	{
 		const auto& project = parsedConfig->_projects[i];
+		// A single invalid project skips that project, it does not abandon the rest of the
+		// batch. ValidateEvaluationProjectConfig has already logged why.
 		if (!ValidateEvaluationProjectConfig(project, i))
 		{
-			//LOG_ERROR("Failed to parse evaluation config '{}'.", configPath.string());
-			return;
-		}
-		if (project._mesh.empty() || project._cage.empty() || project._deformedCage.empty())
-		{
-			LOG_WARN("Skipping project {} due to missing required file keys (mesh/cage/deformedCage).", i);
 			continue;
 		}
 
@@ -564,15 +684,32 @@ void Editor::StartEvaluation()
 		std::filesystem::create_directories(projectOutputDir);
 
 		_projectModel->_deformationType = *deformationType;
-		_projectModel->_pmvcComputeType = ParsePMVCComputeType(project._pmvcComputeType).value_or(PMVCComputeType::Ring);
-		_projectModel->_pmvcUseOffset = project._pmvcUseOffset.value_or(false);
 		_projectModel->_meshFilepath = evaluationRoot / project._mesh;
 		_projectModel->_cageFilepath = evaluationRoot / project._cage;
 		_projectModel->_deformedCageFilepath = evaluationRoot / project._deformedCage;
-		_projectModel->_cubemapSize = project._cubemapSize.value_or(32);
-		_projectModel->_pmvcTargetCount = project._pmvcTargetCount.value_or(64);
+
+		// Reset rather than inherit: leaving the embedding of the previous project (or of
+		// the startup project) in place would silently evaluate the wrong one.
+		_projectModel->_embeddingFilepath = project._embedding.has_value()
+			? std::optional<std::filesystem::path>(evaluationRoot / project._embedding.value())
+			: std::nullopt;
+		if (DeformationTypeHelpers::RequiresEmbedding(*deformationType) && !_projectModel->_embeddingFilepath.has_value())
+		{
+			LOG_WARN("Project '{}' uses coordinateType '{}', which requires an embedding, but the config has no 'embedding' key.",
+				projectName,
+				project._coordinateType);
+		}
+
+		if (project._samples.has_value())
+		{
+			_projectModel->_numSamples = project._samples.value();
+		}
+
 		_projectModel->_pmvcHitCount = project._pmvcHitCount.value_or(1);
-		_projectModel->_pmvcOmitNegative = project._pmvcOmitNegative.value_or(true);
+		_projectModel->_pmvcSkipEvenHits = project._pmvcSkipEvenHits.value_or(false);
+		_projectModel->_pmvcUseInteriorDistance = project._pmvcUseInteriorDistance.value_or(false);
+		// The offset variant is the PMVCO coordinate type, so the preset derives it (and
+		// the hit count it implies) from the coordinate type of the project.
 		_projectModel->ApplyPMVCPreset();
 
 		const auto start = std::chrono::steady_clock::now();
@@ -627,12 +764,9 @@ void Editor::StartEvaluation()
 				std::nullopt,
 				std::nullopt,
 				std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(1)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSkipEvenHits) : std::nullopt,
+				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
 			continue;
 		}
 
@@ -648,23 +782,47 @@ void Editor::StartEvaluation()
 		ExportWeights(projectOutputDir / "weights.dmat");
 		ExportDeformedCage(projectOutputDir / "deformed_cage.obj");
 		ExportDeformedMeshes(projectOutputDir / "deformed_mesh.obj");
-		if (project._vertices.has_value())
+		if (const auto influenceVertices = project.GetInfluenceVertices(); influenceVertices.has_value())
 		{
-			LOG_DEBUG("Exporting influence map for project '{}' with {} vertices.", projectName, project._vertices->size());
-			ExportInfluenceColorMap(projectOutputDir / "influence_map.obj", project._vertices);
+			LOG_DEBUG("Exporting influence map for project '{}' with {} vertices.", projectName, influenceVertices->size());
+			ExportInfluenceColorMap(projectOutputDir / "influence_map.obj", influenceVertices);
+			WriteSelectedVerticesFile(projectOutputDir / "influence_map_vertices.txt", influenceVertices.value());
+		}
 
-			std::ofstream selectedVerticesOutput(projectOutputDir / "influence_map_vertices.txt", std::ios::out | std::ios::trunc);
-			if (!selectedVerticesOutput.is_open())
+		// The two distance maps follow the influence map (same vertex colored format) but
+		// are toggled independently of it and of each other, each measured from its own
+		// single cage vertex, so one project can export both.
+		for (const auto useEuclideanDistance : { true, false })
+		{
+			const auto distanceVertices = project.GetDistanceFieldVertices(useEuclideanDistance);
+			if (!distanceVertices.has_value())
 			{
-				LOG_WARN("Unable to write influence map vertices file for project '{}'.", projectName);
+				continue;
 			}
-			else
+
+			// Keeps the defaults of the color map (automatic isoline spacing, normalized
+			// against the maximum of the data set) for every key the project omits.
+			DistanceColorMapParams colorMapParams;
+			if (project._distanceFieldInterval.has_value())
 			{
-				for (const auto vertexIdx : project._vertices.value())
-				{
-					selectedVerticesOutput << vertexIdx << "\n";
-				}
+				colorMapParams.contourInterval = project._distanceFieldInterval.value();
 			}
+			if (project._distanceFieldEmphasis.has_value())
+			{
+				colorMapParams.contourEmphasisEvery = project._distanceFieldEmphasis.value();
+			}
+			if (project._distanceFieldMax.has_value())
+			{
+				colorMapParams.maxDistance = project._distanceFieldMax.value();
+			}
+
+			const std::string fileStem = useEuclideanDistance ? "euclidean_distance_map" : "interior_distance_map";
+			LOG_DEBUG("Exporting the {} distance field for project '{}'.", useEuclideanDistance ? "euclidean" : "interior", projectName);
+			ExportDistanceFieldColorMap(projectOutputDir / (fileStem + ".obj"),
+				useEuclideanDistance,
+				distanceVertices,
+				std::move(colorMapParams));
+			WriteSelectedVerticesFile(projectOutputDir / (fileStem + "_vertices.txt"), distanceVertices.value());
 		}
 		const auto meshVertexCount = _projectData
 			? std::optional<int32_t>(static_cast<int32_t>(_projectData->_mesh._vertices.rows()))
@@ -679,7 +837,6 @@ void Editor::StartEvaluation()
 		//_cubemapRenderer = std::make_shared<CubemapManager>(_sceneManager->_renderPipelineManager, _renderResourceManager, _device, _instance, 32, VK_FORMAT_R32G32B32A32_SFLOAT);
 		
 
-		//timingOutput << projectName << "," << project._coordinateType << "," << elapsedMs <<  ",cubemapSize: " << project._cubemapSize.value_or(32) <<'\n';
 		results.push_back(EvaluationResult{
 			projectName,
 			project._coordinateType,
@@ -693,12 +850,9 @@ void Editor::StartEvaluation()
 			stageTimings._deformationApplyMs,
 						meshVertexCount,
 			cageVertexCount,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<std::string>(project._pmvcComputeType) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcUseOffset.value_or(false)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._cubemapSize.value_or(32)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcTargetCount.value_or(64)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(project._pmvcHitCount.value_or(1)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(project._pmvcOmitNegative.value_or(true)) : std::nullopt });
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSkipEvenHits) : std::nullopt,
+			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
@@ -757,29 +911,17 @@ void Editor::StartEvaluation()
 		{
 			timingOutput << ",\n      \"numCageVertices\": " << result._cageVertexCount.value();
 		}
-		if (result._pmvcComputeType.has_value())
-		{
-			timingOutput << ",\n      \"pmvcComputeType\": \"" << EscapeJsonString(result._pmvcComputeType.value()) << "\"";
-		}
-		if (result._pmvcUseOffset.has_value())
-		{
-			timingOutput << ",\n      \"pmvcUseOffset\": " << (result._pmvcUseOffset.value() ? "true" : "false");
-		}
-		if (result._cubemapSize.has_value())
-		{
-			timingOutput << ",\n      \"cubemapSize\": " << result._cubemapSize.value();
-		}
-		if (result._pmvcTargetCount.has_value())
-		{
-			timingOutput << ",\n      \"targetCount\": " << result._pmvcTargetCount.value();
-		}
 		if (result._pmvcHitCount.has_value())
 		{
 			timingOutput << ",\n      \"hitCount\": " << result._pmvcHitCount.value();
 		}
-		if (result._pmvcOmitNegative.has_value())
+		if (result._pmvcSkipEvenHits.has_value())
 		{
-			timingOutput << ",\n      \"omitNegative\": " << (result._pmvcOmitNegative.value() ? "true" : "false");
+			timingOutput << ",\n      \"skipEvenHits\": " << (result._pmvcSkipEvenHits.value() ? "true" : "false");
+		}
+		if (result._pmvcUseInteriorDistance.has_value())
+		{
+			timingOutput << ",\n      \"useInteriorDistance\": " << (result._pmvcUseInteriorDistance.value() ? "true" : "false");
 		}
 		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
 	}
@@ -855,6 +997,26 @@ void Editor::RecordUI()
 						if (filepath.has_value())
 						{
 							ExportInfluenceColorMap(filepath.value());
+						}
+					}
+
+					if (ImGui::MenuItem("Interior Distance Color Map...", nullptr))
+					{
+						const auto filepath = UIHelpers::PresentExportFilePopup({ { "Mesh (.obj)", "obj" } }, "interior_distance_map.obj");
+
+						if (filepath.has_value())
+						{
+							ExportDistanceFieldColorMap(filepath.value(), false);
+						}
+					}
+
+					if (ImGui::MenuItem("Euclidean Distance Color Map...", nullptr))
+					{
+						const auto filepath = UIHelpers::PresentExportFilePopup({ { "Mesh (.obj)", "obj" } }, "euclidean_distance_map.obj");
+
+						if (filepath.has_value())
+						{
+							ExportDistanceFieldColorMap(filepath.value(), true);
 						}
 					}
 
@@ -1149,7 +1311,6 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 
 		auto projectResult = _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
 			projectModelSnapshot->_deformationType,
-			projectModelSnapshot->_pmvcComputeType,
 			projectModelSnapshot->_LBCWeightingScheme,
 			projectModelSnapshot->_meshFilepath.value(),
 			projectModelSnapshot->_cageFilepath.value(),
@@ -1194,16 +1355,14 @@ void Editor::OnNewProjectCreated(const std::shared_ptr<std::promise<void>>& comp
 			{
 				try
 				{
-					_cubemapRenderer->Initialize(static_cast<uint32_t>(projectModelSnapshot->_cubemapSize));
+					_cubemapRenderer->Initialize(PMVCSettings::kCubemapSize);
 					_cubemapRenderer->SetCage(projectData->_cage);
 					_cubemapRenderer->SetMesh(projectData->_mesh);
 					promise->set_value(_cubemapRenderer->ComputeCoordinates(
-					projectData->_pmvcComputeType,
-					projectData->_pmvcUseOffset,
-					static_cast<uint32_t>(projectModelSnapshot->_pmvcTargetCount),
-					static_cast<uint32_t>(projectModelSnapshot->_pmvcHitCount),
-					projectModelSnapshot->_pmvcOmitNegative));
-					//promise->set_value(_cubemapRenderer->ComputeCoordinates(projectData->_deformationType));
+						projectData->_pmvcUseOffset,
+						static_cast<uint32_t>(projectModelSnapshot->_pmvcHitCount),
+						projectModelSnapshot->_pmvcSkipEvenHits,
+						projectModelSnapshot->_pmvcUseInteriorDistance));
 				}
 				catch (...)
 				{
@@ -2043,6 +2202,49 @@ void Editor::ExportInfluenceColorMap(std::filesystem::path filepath,
 		_projectData->CanInterpolateWeights());
 }
 
+void Editor::ExportDistanceFieldColorMap(std::filesystem::path filepath,
+	const bool useEuclideanDistance,
+	std::optional<std::vector<int32_t>> selectedVertices,
+	DistanceColorMapParams colorMapParams) const
+{
+	CheckFormat(!_isComputingWeightsData.load(std::memory_order_relaxed), "The weights and the deformation mesh haven't been computed yet to export.");
+	if (!selectedVertices.has_value() && !_projectData->_parametrization.has_value())
+	{
+		LOG_WARN("Skipping distance field export because parametrization data is missing and no selected vertices were provided.");
+
+		return;
+	}
+
+	// Only the interior distances have to be read from somewhere, the Euclidean ones follow
+	// from the vertex positions alone.
+	const Eigen::MatrixXf* interiorDetours = nullptr;
+	if (!useEuclideanDistance)
+	{
+		// The interior distances are read back from the table the interior distance PMVC
+		// variant filled, an empty table means the field does not exist yet.
+		interiorDetours = (_cubemapRenderer != nullptr) ? &_cubemapRenderer->GetInteriorDetours() : nullptr;
+
+		if (interiorDetours == nullptr || interiorDetours->size() == 0)
+		{
+			LOG_WARN("Skipping interior distance field export because no interior distances have been computed for this project. "
+				"Run the project with the interior distance PMVC variant first, or export the euclidean distance field instead.");
+
+			return;
+		}
+	}
+
+	auto parametrization = _projectData->_parametrization.value_or(Parametrization { });
+
+	_meshOperationSystem->ExecuteOperation<MeshExportDistanceFieldOperation>(
+		_projectData->_mesh,
+		_projectData->_cage,
+		std::move(parametrization),
+		std::move(selectedVertices),
+		std::move(filepath),
+		interiorDetours,
+		std::move(colorMapParams));
+}
+
 void Editor::OnComputeInfluenceColorMap(const bool shouldRenderInfluenceMap) const
 {
 	UpdateMeshVertexColors(shouldRenderInfluenceMap && _projectModel->CanRenderInfluenceMap());
@@ -2074,7 +2276,6 @@ MeshOperationResult<std::shared_ptr<ProjectData>> Editor::CreateProject() const
 {
 	return _meshOperationSystem->ExecuteOperation<MeshLoadOperation>(
 		_projectModel->_deformationType,
-		_projectModel->_pmvcComputeType,
 		_projectModel->_LBCWeightingScheme,
 		_projectModel->_meshFilepath.value(),
 		_projectModel->_cageFilepath.value(),

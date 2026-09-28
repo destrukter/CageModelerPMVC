@@ -8,6 +8,9 @@
 #include <Eigen/Core>
 #include <LBC/DataSetup.h>
 
+#include <optional>
+#include <vector>
+
 enum class DeformationType : uint8_t
 {
 	MVC,
@@ -24,12 +27,27 @@ enum class DeformationType : uint8_t
 	PMVCO
 };
 
-enum class PMVCComputeType : uint8_t
+/**
+ * Fixed settings of the PMVC Ring pipeline. They used to be configurable per project, but
+ * every variant now runs through the same pipeline with the same cubemap resolution and
+ * ring size, so they are constants instead of project settings.
+ */
+struct PMVCSettings
 {
-	Serial,
-	Ring,
-	All,
-	Cpu
+	/// Resolution of a single cubemap face.
+	static constexpr uint32_t kCubemapSize = 32;
+
+	/// Number of render targets in the ring.
+	static constexpr uint32_t kRingTargetCount = 64;
+
+	/**
+	 * Upper bound on the peeling layers a project may request. Every hit occupies six
+	 * array layers of the cubemap images, and Vulkan only guarantees 256 array layers, so
+	 * 256 / 6 is the portable ceiling. Devices that allow more are not exploited here
+	 * because the footprint also grows with the ring size; a request that exceeds what the
+	 * device actually supports is rejected when the render targets are created.
+	 */
+	static constexpr uint64_t kMaxHitCount = 42;
 };
 
 struct DeformationTypeHelpers
@@ -101,6 +119,36 @@ struct DeformationTypeHelpers
 		return deformationType == DeformationType::LBC || deformationType == DeformationType::Harmonic || deformationType == DeformationType::BBW;
 	}
 };
+
+/**
+ * Resolves the cage vertices an export is centered on: the explicit selection when one was
+ * made, otherwise every vertex the parametrization translates. Shared by the influence
+ * color map and the distance field color map so both are driven by the same selection.
+ */
+[[nodiscard]] inline std::vector<int> ResolveControlVertexIndices(const std::optional<std::vector<int32_t>>& selectedVertices,
+	const Parametrization& parametrization)
+{
+	std::vector<int> controlVerticesIdx;
+
+	if (selectedVertices.has_value())
+	{
+		controlVerticesIdx.reserve(selectedVertices->size());
+		for (const auto vertexIdx : selectedVertices.value())
+		{
+			controlVerticesIdx.push_back(vertexIdx);
+		}
+	}
+	else
+	{
+		controlVerticesIdx.reserve(parametrization.translations_per_vertex.size());
+		for (const auto& it : parametrization.translations_per_vertex)
+		{
+			controlVerticesIdx.push_back(it.first);
+		}
+	}
+
+	return controlVerticesIdx;
+}
 
 template <typename Scalar, int Rows, int Cols>
 struct std::hash<Eigen::Matrix<Scalar, Rows, Cols>>
@@ -178,7 +226,6 @@ struct MeshComputeDeformationOperationResult
 struct ProjectData
 {
 	ProjectData(const DeformationType deformationType,
-		const PMVCComputeType pmvcComputeType,
 		const LBC::DataSetup::WeightingScheme LBCWeightingScheme,
 		EigenMesh mesh,
 		EigenMesh cage,
@@ -202,7 +249,6 @@ struct ProjectData
 		const bool noOffset,
 		const bool pmvcUseOffset)
 		: _deformationType(deformationType)
-		, _pmvcComputeType(pmvcComputeType)
 		, _LBCWeightingScheme(LBCWeightingScheme)
 		, _mesh(std::move(mesh))
 		, _cage(std::move(cage))
@@ -256,7 +302,6 @@ struct ProjectData
 	}
 
 	DeformationType _deformationType = DeformationType::Green;
-	PMVCComputeType _pmvcComputeType = PMVCComputeType::All;
 	LBC::DataSetup::WeightingScheme _LBCWeightingScheme = LBC::DataSetup::WeightingScheme::SQUARE;
 
 	EigenMesh _mesh;
