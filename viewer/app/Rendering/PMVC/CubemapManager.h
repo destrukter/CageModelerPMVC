@@ -62,23 +62,29 @@ public:
 	 *
 	 * @param useOffset Use the offset variant (PMVCO), which weights by the solid angle
 	 *                  of the texel alone.
-	 * @param hitCount Number of depth peeling layers rendered per mesh vertex. The
-	 *                 negative (every second) hit contributions are omitted, except for
-	 *                 a hit count of three where alpha, beta and theta are applied to the
-	 *                 first, second and third hit.
-	 * @param useInteriorDistance Weight by heat-method interior distances instead of the
-	 *                            rasterized Euclidean depth.
+	 * @param hitCount Number of depth peeling layers rendered per mesh vertex. All of them
+	 *                 are weighted against each other along their ray and normalized so
+	 *                 that every ray contributes the same leverage.
+	 * @param skipEvenHits Drop the entry (every second) hits from that split.
+	 * @param useInteriorDistance Bias the split along a ray towards hits reachable without
+	 *                            a detour through the cage interior.
 	 */
 	MeshOperationResult<MeshComputeWeightsOperationResult> ComputeCoordinates(
 		bool useOffset,
 		uint32_t hitCount = 1,
-		float alpha = 1.0f,
-		float beta = -1.0f,
-		float theta = 1.0f,
+		bool skipEvenHits = false,
 		bool useInteriorDistance = false);
 
 	void SetCage(const EigenMesh& mesh) { _cageMesh = mesh; }
 	void SetMesh(const EigenMesh& mesh) { _deformableMesh = mesh; }
+
+	/**
+	 * Read-only access to the memoized interior detour table (rows = cage vertices, cols =
+	 * mesh vertices, each entry the interior distance minus the Euclidean distance). It is
+	 * empty until an interior-distance PMVC computation has filled it, so a reader can tell
+	 * whether the field exists without triggering a computation of its own.
+	 */
+	[[nodiscard]] const Eigen::MatrixXf& GetInteriorDetours() const { return _interiorDetours; }
 
 private:
 	//init functions:

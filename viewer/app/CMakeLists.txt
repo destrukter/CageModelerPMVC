@@ -27,6 +27,7 @@ add_executable(${PROJECT_NAME}
     Core/Subsystem.cpp
     Logging/LoggingSubsystem.cpp
     Editor/Editor.cpp
+    Editor/EvaluationOptions.cpp
     Editor/Scene.cpp
     Editor/Gizmo.cpp
     UI/WindowSubsystem.cpp
@@ -52,6 +53,7 @@ add_executable(${PROJECT_NAME}
     Mesh/Operations/MeshComputeInfluenceMapOperation.cpp
     Mesh/Operations/MeshComputeDeformationOperation.cpp
     Mesh/Operations/MeshExportInfluenceMapOperation.cpp
+    Mesh/Operations/MeshExportDistanceFieldOperation.cpp
     Mesh/Operations/MeshLoadOperation.cpp
     Mesh/Operations/MeshExportOperation.cpp
     Rendering/Commands/BufferCommand.h

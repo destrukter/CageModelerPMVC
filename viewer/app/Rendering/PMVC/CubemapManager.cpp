@@ -365,11 +365,11 @@ void CubemapManager::EnsureInteriorDistanceTable()
 	InteriorDistanceParams params;
 	computeInteriorDistances(_cageMesh._vertices, _cageMesh._faces, _deformableMesh._vertices, params, _interiorDetours);
 
-	// Store detours (interior minus Euclidean distance) instead of absolute distances:
-	// the shader adds the interpolated detour on top of the per-pixel rasterized hit
-	// distance, so wherever the cage is convex from the mesh vertex the weights reduce
-	// exactly to the Euclidean variant. Interpolating absolute cage-vertex distances
-	// would overestimate the hit distance mid-triangle on coarse cages.
+	// Store detours (interior minus Euclidean distance) instead of absolute distances. The
+	// shader forms r / (r + detour) from the per-pixel rasterized distance, so wherever the
+	// interior path is the straight one the detour vanishes and the split is unchanged.
+	// Interpolating absolute cage-vertex distances would instead misstate the distance
+	// mid-triangle on coarse cages.
 	for (Eigen::Index mesh = 0; mesh < _interiorDetours.cols(); ++mesh)
 	{
 		const Eigen::Vector3d meshPosition = _deformableMesh._vertices.row(mesh).leftCols<3>();
@@ -391,9 +391,7 @@ void CubemapManager::EnsureInteriorDistanceTable()
 MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCoordinates(
 	const bool useOffset,
 	const uint32_t hitCount,
-	const float alpha,
-	const float beta,
-	const float theta,
+	const bool skipEvenHits,
 	const bool useInteriorDistance)
 {
 	assert(_device && "Device is null");
@@ -405,12 +403,30 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 	CreateVertexBufferFromMesh();
 	CreateIndexBufferFromMesh();
 
-	// The offset variant weights by solid angle only, there is no distance in its
-	// formula for the interior distance to replace.
+	// The offset variant has no distance term to peel against, so it always runs with a
+	// single hit.
+	const uint32_t effectiveHitCount = useOffset
+		? 1u
+		: static_cast<uint32_t>(std::clamp<uint64_t>(hitCount, 1, PMVCSettings::kMaxHitCount));
+
+	if (!useOffset && hitCount > PMVCSettings::kMaxHitCount)
+	{
+		LOG_WARN("Hit count {} exceeds the supported maximum of {}, clamping.", hitCount, PMVCSettings::kMaxHitCount);
+	}
+
+	// The interior distance biases how a ray splits its contribution between its hits, so it
+	// needs at least two of them. On the first hit the straight segment from the mesh vertex
+	// lies inside the cage, which makes its interior distance equal to its Euclidean one, so
+	// building the table for a single hit would cost one heat-method solve per cage vertex
+	// and change nothing.
 	const Eigen::MatrixXf* interiorDetours = nullptr;
 	if (useInteriorDistance && useOffset)
 	{
 		LOG_WARN("Interior distance PMVC is not available with the offset (PMVCO) variant, using the offset weighting instead.");
+	}
+	else if (useInteriorDistance && effectiveHitCount < 2)
+	{
+		LOG_WARN("Interior distance PMVC has no effect with a hit count of one, skipping the detour table. Raise the hit count to use it.");
 	}
 	else if (useInteriorDistance)
 	{
@@ -421,17 +437,11 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		}
 	}
 
-	// The offset variant has no distance term to peel against, so it always runs with a
-	// single hit.
-	const uint32_t effectiveHitCount = useOffset ? 1u : std::max(1u, hitCount);
-
-	LOG_INFO("PMVC compute (Ring): hitCount={}, offset={}, interiorDistance={}, alpha={}, beta={}, theta={}",
+	LOG_INFO("PMVC compute (Ring): hitCount={}, offset={}, skipEvenHits={}, interiorDistance={}",
 		effectiveHitCount,
 		useOffset,
-		interiorDetours != nullptr,
-		alpha,
-		beta,
-		theta);
+		skipEvenHits,
+		interiorDetours != nullptr);
 
 	const auto instanceInitStart = std::chrono::steady_clock::now();
 	CubemapRenderInstance instance(
@@ -440,9 +450,7 @@ MeshOperationResult<MeshComputeWeightsOperationResult> CubemapManager::ComputeCo
 		useOffset,
 		PMVCSettings::kRingTargetCount,
 		effectiveHitCount,
-		alpha,
-		beta,
-		theta,
+		skipEvenHits,
 		interiorDetours,
 
 		_device,
