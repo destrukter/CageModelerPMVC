@@ -100,8 +100,10 @@ class CoordinateSetup:
     #: Drop the entry (every second) hits from the per-ray weight split.
     skip_even_hits: bool = False
 
-    #: Weight PMVC with heat-method interior distances instead of the rasterized depth.
-    #: This is what fills the table the interior distance map is read back from.
+    #: Bias the per-ray weight split towards hits reachable without a detour through the
+    #: cage interior. Needs a hit_count of at least 2, because the first hit of a ray
+    #: never carries a detour. This is what fills the table the interior distance map is
+    #: read back from.
     use_interior_distance: bool = False
 
     #: Number of parameter samples.
@@ -479,6 +481,17 @@ def _validate_setup(problems, setup):
                 where,
                 "use_interior_distance requires the PMVC coordinate type, not '{}'.".format(canonical),
             )
+        if setup.skip_even_hits:
+            problems.warn(where, "skip_even_hits is only used by the PMVC coordinate type.")
+
+    # The viewer skips the detour table with a single hit, so the setup would silently
+    # run (and be recorded) as plain Euclidean PMVC.
+    if canonical == "PMVC" and setup.use_interior_distance and (setup.hit_count or 1) < 2:
+        problems.error(
+            where,
+            "use_interior_distance has no effect with a single hit: the first hit of a ray "
+            "never carries a detour. Set hit_count to at least 2.",
+        )
 
     # The viewer derives the offset variant's settings from the coordinate type
     # itself, so a setup that disagrees would not evaluate what it claims to.
@@ -605,10 +618,14 @@ def is_pmvc(coordinate_type: str) -> bool:
 def produces_interior_distances(setup: CoordinateSetup, coordinate_type: str) -> bool:
     """Whether a run of this setup fills the table the interior distance map reads back.
 
-    Only the interior-distance PMVC variant computes it; every other setup would
-    export nothing at all.
+    Only the interior-distance PMVC variant with at least two hits computes it; every
+    other setup would export nothing at all.
     """
-    return coordinate_type == "PMVC" and bool(setup.use_interior_distance)
+    return (
+        coordinate_type == "PMVC"
+        and bool(setup.use_interior_distance)
+        and (setup.hit_count or 1) >= 2
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +654,9 @@ def build_project(entry, deformed_cage, setup, coordinate_type, project_name, pa
     if setup.samples is not None:
         project["samples"] = setup.samples
 
-    if is_pmvc(coordinate_type):
+    # Only plain PMVC splits a ray between its hits; PMVCO weights by solid angle alone
+    # and the viewer forces its settings, so emitting them would only suggest otherwise.
+    if coordinate_type == "PMVC":
         if setup.hit_count is not None:
             project["hitCount"] = setup.hit_count
         project["skipEvenHits"] = bool(setup.skip_even_hits)

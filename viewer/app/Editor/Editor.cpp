@@ -98,7 +98,6 @@ namespace
 	}
 
 	[[nodiscard]] std::optional<DeformationType> ParseDeformationType(const std::string& value);
-	[[nodiscard]] std::optional<bool> ExtractJsonBoolValue(const std::string& objectText, const std::string& key);
 
 	[[nodiscard]] std::string EscapeJsonString(const std::string& value)
 	{
@@ -128,6 +127,12 @@ namespace
 		std::string _deformedCage;
 		std::optional<std::string> _embedding;
 		std::optional<int32_t> _samples;
+
+		/// The PMVC settings, mirroring the project settings panel: the peeling depth
+		/// ("hitCount"), whether the entry hits take part in the per-ray weight split
+		/// ("skipEvenHits") and whether the interior distance biases it
+		/// ("useInteriorDistance"). All three only apply to the PMVC coordinate type, PMVCO
+		/// weights by solid angle alone and runs with a single hit.
 		std::optional<int32_t> _pmvcHitCount;
 		std::optional<bool> _pmvcSkipEvenHits;
 		std::optional<bool> _pmvcUseInteriorDistance;
@@ -141,8 +146,8 @@ namespace
 		/// "interiorDistanceVertex").
 		///
 		/// The interior distances are read back from the table the interior distance PMVC
-		/// variant fills, so "interiorDistanceMap" only produces an export for a project
-		/// that runs with "useInteriorDistance".
+		/// variant fills, so "interiorDistanceMap" only produces an export for a PMVC
+		/// project that runs with "useInteriorDistance" and at least two hits.
 		std::optional<bool> _influenceMap;
 		std::optional<std::vector<int32_t>> _influenceVertices;
 		std::optional<bool> _euclideanDistanceMap;
@@ -158,27 +163,10 @@ namespace
 		std::optional<int32_t> _distanceFieldEmphasis;
 		std::optional<float> _distanceFieldMax;
 
-		/// Superseded keys, kept so that hand written configs predating the three
-		/// independent toggles keep working: a shared "vertices" selection driving the
-		/// influence map, plus a "distanceField" toggle whose "distanceFieldEuclidean"
-		/// switch picked one of the two distance maps.
-		std::optional<std::vector<int32_t>> _vertices;
-		std::optional<bool> _exportDistanceField;
-		std::optional<bool> _distanceFieldEuclidean;
-
 		/// @return The cage vertices the influence map is exported for, if it is enabled.
 		[[nodiscard]] std::optional<std::vector<int32_t>> GetInfluenceVertices() const
 		{
-			const auto& vertices = _influenceVertices.has_value() ? _influenceVertices : _vertices;
-
-			// Without an explicit toggle the influence map follows the legacy behavior and
-			// is exported whenever a selection was given at all.
-			if (!_influenceMap.value_or(vertices.has_value()))
-			{
-				return std::nullopt;
-			}
-
-			return vertices;
+			return _influenceMap.value_or(false) ? _influenceVertices : std::nullopt;
 		}
 
 		/**
@@ -190,21 +178,25 @@ namespace
 			const auto& toggle = useEuclideanDistance ? _euclideanDistanceMap : _interiorDistanceMap;
 			const auto& vertex = useEuclideanDistance ? _euclideanDistanceVertex : _interiorDistanceVertex;
 
-			if (toggle.value_or(false))
-			{
-				return vertex.has_value()
-					? std::optional<std::vector<int32_t>>(std::vector<int32_t> { vertex.value() })
-					: _vertices;
-			}
-
-			// The superseded keys select exactly one of the two maps rather than toggling
-			// them independently, so they only apply when the new toggle is absent.
-			if (toggle.has_value() || !_exportDistanceField.value_or(false))
+			if (!toggle.value_or(false) || !vertex.has_value())
 			{
 				return std::nullopt;
 			}
 
-			return (_distanceFieldEuclidean.value_or(false) == useEuclideanDistance) ? _vertices : std::nullopt;
+			return std::vector<int32_t> { vertex.value() };
+		}
+
+		/**
+		 * @return Whether a run of this project fills the interior detour table, which is
+		 * what the interior distance map is read back from. CubemapManager only builds it
+		 * for plain PMVC with the interior distance enabled and at least two hits, because
+		 * the first hit of a ray never carries a detour.
+		 */
+		[[nodiscard]] bool ComputesInteriorDistances(const DeformationType deformationType) const
+		{
+			return deformationType == DeformationType::PMVC &&
+				_pmvcUseInteriorDistance.value_or(false) &&
+				_pmvcHitCount.value_or(1) >= 2;
 		}
 	};
 
@@ -411,22 +403,23 @@ namespace
 			project._interiorDistanceMap = ExtractJsonBoolValue(objectText, "interiorDistanceMap");
 			project._interiorDistanceVertex = ExtractJsonIntValue(objectText, "interiorDistanceVertex");
 
-			// The shared selection of the superseded schema, which the three maps fall back
-			// to when they carry no selection of their own.
-			project._vertices = ExtractJsonIntArrayValue(objectText, "vertices");
-			if (!project._vertices.has_value())
-			{
-				project._vertices = ExtractJsonIntArrayValue(objectText, "selectedVertices");
-			}
-			if (!project._vertices.has_value())
-			{
-				project._vertices = project._influenceVertices;
-			}
-			project._exportDistanceField = ExtractJsonBoolValue(objectText, "distanceField");
-			project._distanceFieldEuclidean = ExtractJsonBoolValue(objectText, "distanceFieldEuclidean");
 			project._distanceFieldInterval = ExtractJsonFloatValue(objectText, "distanceFieldInterval");
 			project._distanceFieldEmphasis = ExtractJsonIntValue(objectText, "distanceFieldEmphasis");
 			project._distanceFieldMax = ExtractJsonFloatValue(objectText, "distanceFieldMax");
+
+			// Keys of the schema that predates the independent map toggles are no longer
+			// read, so a config still using them would silently lose its exports.
+			for (const auto* const supersededKey : { "vertices", "selectedVertices", "distanceField", "distanceFieldEuclidean" })
+			{
+				if (objectText.find(std::string("\"") + supersededKey + "\"") != std::string::npos)
+				{
+					LOG_WARN("Project '{}' uses the superseded key '{}', which is ignored. Use 'influenceMap'/'influenceVertices', "
+						"'euclideanDistanceMap'/'euclideanDistanceVertex' and 'interiorDistanceMap'/'interiorDistanceVertex' instead.",
+						project._name,
+						supersededKey);
+				}
+			}
+
 			config._projects.push_back(std::move(project));
 		}
 		return config;
@@ -440,16 +433,48 @@ namespace
 			return false;
 		}
 
-		if (const auto deformationType = ParseDeformationType(project._coordinateType); !deformationType.has_value())
+		const auto deformationType = ParseDeformationType(project._coordinateType);
+		if (!deformationType.has_value())
 		{
 			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", projectIndex, project._coordinateType);
 			return false;
 		}
 
-		if (project._pmvcHitCount.has_value() && project._pmvcHitCount.value() <= 0)
+		// Every hit occupies six cubemap array layers, so the peeling depth is bounded by
+		// the array layers Vulkan guarantees rather than clamped behind the config's back.
+		if (project._pmvcHitCount.has_value() &&
+			(project._pmvcHitCount.value() <= 0 || static_cast<uint64_t>(project._pmvcHitCount.value()) > PMVCSettings::kMaxHitCount))
 		{
-			LOG_WARN("Skipping project {} due to invalid hitCount {} (must be > 0).", projectIndex, project._pmvcHitCount.value());
+			LOG_WARN("Skipping project {} due to invalid hitCount {} (must be within 1..{}).",
+				projectIndex,
+				project._pmvcHitCount.value(),
+				PMVCSettings::kMaxHitCount);
 			return false;
+		}
+
+		// The PMVC settings shape the per-ray weight split, which only the plain PMVC type
+		// has: every other type ignores them, and PMVCO has them overridden by its preset.
+		const auto hasSplitSettings = project._pmvcHitCount.value_or(1) != 1 ||
+			project._pmvcSkipEvenHits.value_or(false) ||
+			project._pmvcUseInteriorDistance.value_or(false);
+		const auto hasPMVCSettings = hasSplitSettings || project._pmvcHitCount.has_value();
+		if (*deformationType == DeformationType::PMVCO && hasSplitSettings)
+		{
+			LOG_WARN("Project {} sets 'hitCount', 'skipEvenHits' or 'useInteriorDistance' for PMVCO, which weights by solid angle alone "
+				"and always runs with a single hit. The settings are ignored.", projectIndex);
+		}
+		else if (!DeformationTypeHelpers::IsPMVC(*deformationType) && hasPMVCSettings)
+		{
+			LOG_WARN("Project {} sets PMVC settings for coordinateType '{}', which ignores them.", projectIndex, project._coordinateType);
+		}
+
+		// The first hit of a ray never carries a detour, so with a single hit the interior
+		// distance cannot change any weight and no detour table is built.
+		if (*deformationType == DeformationType::PMVC &&
+			project._pmvcUseInteriorDistance.value_or(false) &&
+			project._pmvcHitCount.value_or(1) < 2)
+		{
+			LOG_WARN("Project {} enables 'useInteriorDistance' with a single hit, where it has no effect. Raise 'hitCount' to at least 2.", projectIndex);
 		}
 
 		if (project._influenceMap.value_or(false) && !project.GetInfluenceVertices().has_value())
@@ -459,8 +484,7 @@ namespace
 		}
 
 		// Both distance maps are measured from exactly one cage vertex, so an enabled map
-		// without a vertex of its own (and without a selection to fall back to) cannot be
-		// exported at all.
+		// without a vertex cannot be exported at all.
 		if (project._euclideanDistanceMap.value_or(false) && !project.GetDistanceFieldVertices(true).has_value())
 		{
 			LOG_WARN("Skipping project {} because 'euclideanDistanceMap' is enabled but no 'euclideanDistanceVertex' was given.", projectIndex);
@@ -473,12 +497,10 @@ namespace
 			return false;
 		}
 
-		// The interior distances are read back from the table the interior distance PMVC
-		// variant fills, so this combination would export nothing at all.
-		if (project._interiorDistanceMap.value_or(false) && !project._pmvcUseInteriorDistance.value_or(false))
+		if (project._interiorDistanceMap.value_or(false) && !project.ComputesInteriorDistances(*deformationType))
 		{
-			LOG_WARN("Project {} enables 'interiorDistanceMap' but does not run with 'useInteriorDistance'. "
-				"No interior distances will have been computed, so the export will be skipped.", projectIndex);
+			LOG_WARN("Project {} enables 'interiorDistanceMap', but only PMVC with 'useInteriorDistance' and a 'hitCount' of at least 2 "
+				"computes interior distances. The export will be skipped.", projectIndex);
 		}
 
 		return true;
@@ -637,23 +659,27 @@ void Editor::StartEvaluation()
 	constexpr auto buildType = "Debug/Development";
 #endif
 
+	/// The PMVC settings a project actually ran with, after ApplyPMVCPreset() and the
+	/// interior distance fallback, which can differ from what the config asked for.
+	struct EvaluationPMVCSettings
+	{
+		uint64_t _hitCount = 1;
+		bool _skipEvenHits = false;
+		bool _useInteriorDistance = false;
+	};
+
 	struct EvaluationResult
 	{
 		std::string _projectName;
 		std::string _coordinateType;
-		std::string _status;
+		std::string _status = "FAILED";
 		std::optional<double> _elapsedMs;
-		std::optional<double> _initMs;
-		std::optional<double> _renderMs;
-		std::optional<double> _computeMs;
-		std::optional<double> _computeTotalMs;
-		std::optional<double> _transferMs;
-		std::optional<double> _deformationApplyMs;
+		EvaluationStageTimings _stageTimings;
 		std::optional<int32_t> _meshVertexCount;
 		std::optional<int32_t> _cageVertexCount;
-		std::optional<int32_t> _pmvcHitCount;
-		std::optional<bool> _pmvcSkipEvenHits;
-		std::optional<bool> _pmvcUseInteriorDistance;
+
+		/// Only recorded for the plain PMVC type, the only one with a per-ray weight split.
+		std::optional<EvaluationPMVCSettings> _pmvcSettings;
 	};
 
 	std::vector<EvaluationResult> results;
@@ -672,12 +698,8 @@ void Editor::StartEvaluation()
 			continue;
 		}
 
+		// Validated above, so the coordinate type is known.
 		const auto deformationType = ParseDeformationType(project._coordinateType);
-		if (!deformationType.has_value())
-		{
-			LOG_WARN("Skipping project {} due to unsupported coordinateType '{}'.", i, project._coordinateType);
-			continue;
-		}
 
 		const auto projectName = project._name.empty() ? (std::string("project_") + std::to_string(i)) : project._name;
 		const auto projectOutputDir = evaluationRoot / projectName;
@@ -705,12 +727,30 @@ void Editor::StartEvaluation()
 			_projectModel->_numSamples = project._samples.value();
 		}
 
-		_projectModel->_pmvcHitCount = project._pmvcHitCount.value_or(1);
+		_projectModel->_pmvcHitCount = static_cast<uint64_t>(project._pmvcHitCount.value_or(1));
 		_projectModel->_pmvcSkipEvenHits = project._pmvcSkipEvenHits.value_or(false);
 		_projectModel->_pmvcUseInteriorDistance = project._pmvcUseInteriorDistance.value_or(false);
 		// The offset variant is the PMVCO coordinate type, so the preset derives it (and
-		// the hit count it implies) from the coordinate type of the project.
+		// the settings it implies) from the coordinate type of the project.
 		_projectModel->ApplyPMVCPreset();
+		// With a single hit the interior distance is skipped by the renderer, so the
+		// record reports what actually ran rather than what was requested.
+		if (_projectModel->_pmvcHitCount < 2)
+		{
+			_projectModel->_pmvcUseInteriorDistance = false;
+		}
+
+		EvaluationResult result;
+		result._projectName = projectName;
+		result._coordinateType = project._coordinateType;
+		if (*deformationType == DeformationType::PMVC)
+		{
+			result._pmvcSettings = EvaluationPMVCSettings {
+				_projectModel->_pmvcHitCount,
+				_projectModel->_pmvcSkipEvenHits,
+				_projectModel->_pmvcUseInteriorDistance
+			};
+		}
 
 		const auto start = std::chrono::steady_clock::now();
 
@@ -751,22 +791,7 @@ void Editor::StartEvaluation()
 		{
 			LOG_WARN("Evaluation project '{}' failed.", projectName);
 
-			results.push_back(EvaluationResult{
-				projectName,
-				project._coordinateType,
-				"FAILED",
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSkipEvenHits) : std::nullopt,
-				(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
+			results.push_back(std::move(result));
 			continue;
 		}
 
@@ -796,6 +821,13 @@ void Editor::StartEvaluation()
 		{
 			const auto distanceVertices = project.GetDistanceFieldVertices(useEuclideanDistance);
 			if (!distanceVertices.has_value())
+			{
+				continue;
+			}
+
+			// The detour table is memoized across projects, so exporting it for a run that
+			// did not fill it would silently export the table of an earlier project.
+			if (!useEuclideanDistance && !project.ComputesInteriorDistances(*deformationType))
 			{
 				continue;
 			}
@@ -837,22 +869,12 @@ void Editor::StartEvaluation()
 		//_cubemapRenderer = std::make_shared<CubemapManager>(_sceneManager->_renderPipelineManager, _renderResourceManager, _device, _instance, 32, VK_FORMAT_R32G32B32A32_SFLOAT);
 		
 
-		results.push_back(EvaluationResult{
-			projectName,
-			project._coordinateType,
-			"OK",
-			elapsedMs,
-			stageTimings._initMs,
-			stageTimings._renderMs,
-			stageTimings._computeMs,
-			stageTimings._computeTotalMs,
-			stageTimings._transferMs,
-			stageTimings._deformationApplyMs,
-						meshVertexCount,
-			cageVertexCount,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<int32_t>(static_cast<int32_t>(_projectModel->_pmvcHitCount)) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcSkipEvenHits) : std::nullopt,
-			(DeformationTypeHelpers::IsPMVC(*deformationType)) ? std::optional<bool>(_projectModel->_pmvcUseInteriorDistance) : std::nullopt });
+		result._status = "OK";
+		result._elapsedMs = elapsedMs;
+		result._stageTimings = stageTimings;
+		result._meshVertexCount = meshVertexCount;
+		result._cageVertexCount = cageVertexCount;
+		results.push_back(std::move(result));
 		LOG_INFO("Evaluation project '{}' finished in {} ms.", projectName, elapsedMs);
 	}
 
@@ -879,30 +901,19 @@ void Editor::StartEvaluation()
 		{
 			timingOutput << ",\n      \"elapsedMs\": " << result._elapsedMs.value();
 		}
-		if (result._initMs.has_value())
+		const auto writeTiming = [&timingOutput](const char* key, const std::optional<double>& value)
 		{
-			timingOutput << ",\n      \"initMs\": " << result._initMs.value();
-		}
-		if (result._renderMs.has_value())
-		{
-			timingOutput << ",\n      \"renderMs\": " << result._renderMs.value();
-		}
-		if (result._transferMs.has_value())
-		{
-			timingOutput << ",\n      \"transferMs\": " << result._transferMs.value();
-		}
-		if (result._computeMs.has_value())
-		{
-			timingOutput << ",\n      \"computeMs\": " << result._computeMs.value();
-		}
-		if (result._computeTotalMs.has_value())
-		{
-			timingOutput << ",\n      \"computeTotalMs\": " << result._computeTotalMs.value();
-		}
-		if (result._deformationApplyMs.has_value())
-		{
-			timingOutput << ",\n      \"deformationApplyMs\": " << result._deformationApplyMs.value();
-		}
+			if (value.has_value())
+			{
+				timingOutput << ",\n      \"" << key << "\": " << value.value();
+			}
+		};
+		writeTiming("initMs", result._stageTimings._initMs);
+		writeTiming("renderMs", result._stageTimings._renderMs);
+		writeTiming("transferMs", result._stageTimings._transferMs);
+		writeTiming("computeMs", result._stageTimings._computeMs);
+		writeTiming("computeTotalMs", result._stageTimings._computeTotalMs);
+		writeTiming("deformationApplyMs", result._stageTimings._deformationApplyMs);
 		if (result._meshVertexCount.has_value())
 		{
 			timingOutput << ",\n      \"numMeshVertices\": " << result._meshVertexCount.value();
@@ -911,17 +922,12 @@ void Editor::StartEvaluation()
 		{
 			timingOutput << ",\n      \"numCageVertices\": " << result._cageVertexCount.value();
 		}
-		if (result._pmvcHitCount.has_value())
+		if (result._pmvcSettings.has_value())
 		{
-			timingOutput << ",\n      \"hitCount\": " << result._pmvcHitCount.value();
-		}
-		if (result._pmvcSkipEvenHits.has_value())
-		{
-			timingOutput << ",\n      \"skipEvenHits\": " << (result._pmvcSkipEvenHits.value() ? "true" : "false");
-		}
-		if (result._pmvcUseInteriorDistance.has_value())
-		{
-			timingOutput << ",\n      \"useInteriorDistance\": " << (result._pmvcUseInteriorDistance.value() ? "true" : "false");
+			const auto& settings = result._pmvcSettings.value();
+			timingOutput << ",\n      \"hitCount\": " << settings._hitCount;
+			timingOutput << ",\n      \"skipEvenHits\": " << (settings._skipEvenHits ? "true" : "false");
+			timingOutput << ",\n      \"useInteriorDistance\": " << (settings._useInteriorDistance ? "true" : "false");
 		}
 		timingOutput << "\n    }" << (i + 1 < results.size() ? "," : "") << "\n";
 	}

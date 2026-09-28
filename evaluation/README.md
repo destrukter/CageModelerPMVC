@@ -70,7 +70,16 @@ weighted against each other and normalized, so every ray contributes the same le
 matter how often it crosses the cage. Raise it until the viewer stops reporting truncated
 rays; a truncated ray had no room to leave the cage, which distorts the weight of its last
 hit. `skip_even_hits` drops the entry hits from that split, and `use_interior_distance`
-biases it towards the hits reachable without a detour through the cage interior.
+biases it towards the hits reachable without a detour through the cage interior. The
+latter needs a `hit_count` of at least 2, because the first hit of a ray never carries a
+detour. All three only apply to `PMVC` and are only emitted for it: `PMVCO` weights by
+solid angle alone and always runs with a single hit.
+
+The viewer reads exactly these keys (`hitCount`, `skipEvenHits`, `useInteriorDistance`,
+`influenceMap`/`influenceVertices`, `euclideanDistanceMap`/`euclideanDistanceVertex`,
+`interiorDistanceMap`/`interiorDistanceVertex` and the `distanceField*` isoline settings).
+The superseded `vertices`, `selectedVertices`, `distanceField` and `distanceFieldEuclidean`
+keys are no longer read; a config still using them is logged and exports no maps from them.
 
 Filenames and project names are `<entry>__<deformed cage stem>__<setup>`, iteration is
 sorted, so regenerating an unchanged configuration reproduces byte-identical output.
@@ -85,7 +94,10 @@ reported at once, naming the offending entry:
 - no duplicate model entry names, coordinate setup names or generated filenames
 - exactly one vertex where exactly one is required, at least one where a list is required
 - coordinate types are known, and a setup does not ask for something the viewer overrides
-  (`PMVCO` forces a single hit and no interior distance)
+  (`PMVCO` forces a single hit and no interior distance) or skips (`use_interior_distance`
+  with a single hit)
+- `hit_count` is within 1..42: every hit occupies six cubemap array layers, and Vulkan only
+  guarantees 256
 - coordinate types requiring a tetrahedral embedding have one
 
 ## Paths
@@ -105,7 +117,9 @@ git lfs pull
 
 The interior distances are read back from the table the interior-distance PMVC variant
 fills during the run; they are never recomputed by the export. A coordinate setup that is
-not PMVC with `use_interior_distance=True` therefore has nothing to read. The generator
+not PMVC with `use_interior_distance=True` and a `hit_count` of at least 2 therefore has
+nothing to read. The viewer skips the export for such a project as well, because the table
+is memoized across projects and would otherwise belong to an earlier one. The generator
 still emits the pair, but writes `interiorDistanceMap: false` and records the reason in
 the manifest, so no config silently exports nothing.
 
@@ -114,7 +128,8 @@ the manifest, so no config silently exports nothing.
 Per config, below the `evaluation` directory:
 
 ```
-results/timings_<stem>.json                     one row per project: status, stage timings, vertex counts
+results/timings_<stem>.json                     one row per project: status, stage timings, vertex counts,
+                                                and for PMVC the settings it actually ran with
 results/<stem>/weights.dmat                     the computed weights
 results/<stem>/deformed_cage.obj
 results/<stem>/deformed_mesh.obj
